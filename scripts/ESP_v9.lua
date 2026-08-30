@@ -189,17 +189,16 @@ local function areaOf(model, pos)
 end
 
 ----------------------------------------------------------------------
--- RESOLUCIÓN ESTRICTA DE RECORDS
+-- RESOLUCIÓN DE RECORDS
 ----------------------------------------------------------------------
--- Solo estos campos identifican el asset. Nada de recorrer pairs(rec) a ver
--- que cae: pairs() no tiene orden garantizado y devolvia rarezas distintas
--- para el mismo huevo en pasadas distintas.
-local ASSET_KEYS = { "AssetId", "Asset", "AssetName", "Species", "EggType", "Type" }
+-- Estos campos tienen PRIORIDAD para identificar el asset, en este orden.
+-- Si ninguno acierta se mira el resto del record, pero de forma ordenada:
+-- el problema del v8 no era mirar campos de mas, era que pairs() decidia el
+-- ganador y pairs() no tiene orden garantizado.
+local ASSET_KEYS = { "AssetId", "Asset", "AssetName", "Species", "EggType", "Type", "Id", "Name" }
 
--- Solo identificadores realmente unicos. Slot, SlotKey, Key y ModelName se
--- repiten entre huevos (Slot_002 existe en todos los servers) y hacian que un
--- huevo cogiera el record de otro.
-local ID_FIELDS = { "Uid", "UID", "uid", "Id", "ID" }
+-- Claves con las que se puede localizar un record desde el nombre del modelo.
+local ID_FIELDS = { "Uid", "UID", "uid", "Id", "ID", "Key", "SlotKey", "ModelName", "Slot" }
 
 local function displayNameOf(rec)
     if EggRecords and EggRecords.DisplayName then
@@ -209,36 +208,62 @@ local function displayNameOf(rec)
     return nil
 end
 
+-- Determinista pase lo que pase:
+--   1. campos con prioridad, en orden fijo
+--   2. nombre visible, si es inequivoco
+--   3. cualquier otro campo de texto que sea un asset conocido, pero SOLO si
+--      todos apuntan al mismo. Si discrepan, no se resuelve: preferimos
+--      omitir el huevo a mandarlo con la rareza de otro.
 local function recordAssetId(rec)
     if type(rec) ~= "table" then return nil end
+
     for _, k in ipairs(ASSET_KEYS) do
         local v = rec[k]
         if type(v) == "string" and assetIndex[v] then return v end
     end
-    -- Plan B determinista: por nombre visible, y solo si es inequivoco.
+
     local dn = displayNameOf(rec)
     if dn then
         local hit = byEggName[dn:lower()]
         if hit then return hit.id end
     end
-    return nil
+
+    local only
+    for _, v in pairs(rec) do
+        if type(v) == "string" and assetIndex[v] then
+            if only == nil then only = v
+            elseif only ~= v then return nil end
+        end
+    end
+    return only
 end
 
+-- Sirve tambien con assetIndex vacio (si Data.Assets no cargo): asi el
+-- diagnostico puede enseñar que records hay aunque no se puedan resolver.
 local function looksLikeRecord(t)
     if type(t) ~= "table" then return false end
     for _, k in ipairs(ASSET_KEYS) do
         if type(t[k]) == "string" and assetIndex[t[k]] then return true end
     end
-    return displayNameOf(t) ~= nil
+    if displayNameOf(t) ~= nil then return true end
+    for _, f in ipairs({ "Uid", "UID", "uid" }) do
+        if type(t[f]) == "string" and t[f] ~= "" then return true end
+    end
+    return false
 end
 
--- Colision = inservible. Si dos records distintos reclaman la misma clave, esa
--- clave se marca false y no se usa para nadie.
+-- Dos lecturas distintas (ReadFieldEggs y ReadOwnerEggs) devuelven el MISMO
+-- huevo en tablas distintas. Comparar por identidad marcaba eso como colision
+-- y anulaba la clave: con eso no se resolvia ni un huevo. Lo que importa es si
+-- discrepan en el asset, no si son la misma tabla.
 local function put(out, key, node)
     if type(key) ~= "string" or key == "" then return end
     local cur = out[key]
-    if cur == nil then out[key] = node
-    elseif cur ~= node then out[key] = false end
+    if cur == nil or cur == node then out[key] = node; return end
+    if cur == false then return end
+    local a, b = recordAssetId(cur), recordAssetId(node)
+    if a and b and a == b then return end   -- el mismo huevo visto dos veces
+    out[key] = false                        -- de verdad se contradicen
 end
 
 local function deepIndex(node, out, depth, key, seen)
@@ -402,6 +427,15 @@ local function scanOnce()
     local recs, nrec = collectRecords()
     local eggs, skipped, base = {}, 0, 0
 
+    -- Todo lo que hace falta para entender un escaneo que sale mal, sin tener
+    -- que adivinar desde fuera.
+    local D = { zone = 0, why = {}, sampleKeys = nil, sampleName = nil, misses = {} }
+    local function fail(reason, modelName)
+        skipped = skipped + 1
+        D.why[reason] = (D.why[reason] or 0) + 1
+        if #D.misses < 6 then D.misses[#D.misses+1] = (modelName or "?") .. " → " .. reason end
+    end
+
     for _, container in ipairs(Workspace:GetChildren()) do
         if table.find(CONTAINERS, container.Name) then
             local isZone = ZONE_OK[container.Name] == true
@@ -409,14 +443,29 @@ local function scanOnce()
                 if not isZone then
                     base = base + 1
                 else
+                    D.zone = D.zone + 1
                     local uid = uidFromModelName(model.Name)
+                    local collided = (recs[uid] == false) or (recs[model.Name] == false)
+
                     local rec = recs[uid]
-                    if rec == false then rec = nil end            -- clave con colision
+                    if rec == false then rec = nil end
                     if not rec then
                         local alt = recs[model.Name]
                         if alt ~= false then rec = alt end
                     end
                     if not rec then rec = fetchField(model.Name) or fetchField(uid) end
+
+                    -- Guarda una muestra de los campos de un record real: es lo
+                    -- unico que dice como se llaman de verdad en este juego.
+                    if rec and not D.sampleKeys then
+                        local ks = {}
+                        for k, v in pairs(rec) do
+                            if #ks < 14 then ks[#ks+1] = tostring(k) .. "=" .. type(v) end
+                        end
+                        table.sort(ks)
+                        D.sampleKeys = table.concat(ks, " ")
+                        D.sampleName = displayNameOf(rec) or "(sin DisplayName)"
+                    end
 
                     local aid = rec and recordAssetId(rec) or nil
                     local info = aid and assetIndex[aid] or nil
@@ -434,20 +483,21 @@ local function scanOnce()
                             area   = areaOf(model, anchor.Position),
                             model  = model,
                         }
+                    elseif not anchor then
+                        fail("sin parte fisica", model.Name)
+                    elseif not rec then
+                        fail(collided and "clave duplicada" or "sin record", model.Name)
                     else
-                        -- Sin record fiable no se manda. Ni se adivina.
-                        skipped = skipped + 1
+                        fail("record sin asset reconocible", model.Name)
                     end
                 end
             end
         end
     end
 
-    table.sort(eggs, function(a, b)
-        if a.uid ~= b.uid then return a.uid < b.uid end
-        return false
-    end)
-    return eggs, skipped, base, nrec
+    table.sort(eggs, function(a, b) return a.uid < b.uid end)
+    D.records = nrec
+    return eggs, skipped, base, nrec, D
 end
 
 -- Huella del resultado: si dos pasadas seguidas dan la misma, el server ya
@@ -674,13 +724,14 @@ runScan = function(manual)
 
         local started  = os.clock()
         local prevSig  = nil
-        local eggs, skipped, base, nrec = {}, 0, 0, 0
+        local eggs, skipped, base, nrec, D = {}, 0, 0, 0, nil
 
         while true do
             task.wait(CFG.SCAN_STEP)
-            eggs, skipped, base, nrec = scanOnce()
+            eggs, skipped, base, nrec, D = scanOnce()
             SCAN.passes = SCAN.passes + 1
             SCAN.found, SCAN.skipped, SCAN.base = #eggs, skipped, base
+            SCAN.diag = D
             SCAN.phase = "escaneando"
 
             local sig = signature(eggs)
@@ -699,6 +750,22 @@ runScan = function(manual)
         end
 
         SCAN.eggs = eggs
+
+        -- Guardarrail: habia huevos de zona delante y no resolvimos ninguno.
+        -- Mandar full=true con la lista vacia le diria al hub "aqui no hay
+        -- nada" y borraria lo bueno de un reporte anterior. Mejor no mandar y
+        -- gritarlo en el panel.
+        if #eggs == 0 and (D and D.zone or 0) > 0 then
+            SCAN.phase = "error"
+            SCAN.doneAt = os.time()
+            SCAN.sent = 0
+            SCAN.detail = string.format(
+                "%d huevos de zona y 0 resueltos · no se manda nada para no borrar el hub · mira DIAGNOSTICO",
+                D.zone)
+            scanning = false
+            return
+        end
+
         SCAN.phase = "enviando"
         SCAN.detail = ("mandando %d huevos"):format(#eggs)
 
@@ -791,6 +858,8 @@ local function stroke(o, col, tr, th)
 end
 
 local panel, phaseLbl, detailLbl, phaseDot, listBody, hubStatusLbl, whStatusLbl, hopBtnLbl, rescanLbl
+local diagBody
+local diagText = ""
 
 do
     local parent
@@ -875,7 +944,7 @@ do
     local selectTab
     local function mkTab(key, text)
         local b = new("TextButton", {
-            Size = UDim2.new(0, 108, 1, 0), BackgroundColor3 = C.card, BorderSizePixel = 0,
+            Size = UDim2.new(0, 104, 1, 0), BackgroundColor3 = C.card, BorderSizePixel = 0,
             Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = C.mut,
             Text = text, AutoButtonColor = false,
         }, tabRow)
@@ -884,7 +953,10 @@ do
         b.MouseButton1Click:Connect(function() selectTab(key) end)
         return b
     end
-    mkTab("result", "RESULTADO"); mkTab("hub", "HUB"); mkTab("hook", "WEBHOOK")
+    local pDiag = mkPane()
+    panes.diag = pDiag
+    mkTab("result", "RESULTADO"); mkTab("hub", "HUB")
+    mkTab("hook", "WEBHOOK"); mkTab("diag", "DIAGNOSTICO")
 
     selectTab = function(key)
         for k, p in pairs(panes) do p.Visible = (k == key) end
@@ -1113,6 +1185,40 @@ do
         TextColor3 = C.mut, TextWrapped = true, Text = "",
     }, pHook)
 
+    ----------------------------------------------------------- DIAGNOSTICO
+    local diagScroll = new("ScrollingFrame", {
+        Position = UDim2.new(0,0,0,0), Size = UDim2.new(1,0,1,-36),
+        BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3,
+        ScrollBarImageColor3 = C.line, CanvasSize = UDim2.new(0,0,0,0),
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    }, pDiag)
+    diagBody = new("TextLabel", {
+        Size = UDim2.new(1,-8,0,0), Position = UDim2.new(0,4,0,2),
+        AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1,
+        Font = Enum.Font.Code, TextSize = 10.5, TextColor3 = C.txt2,
+        TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+        TextWrapped = true, RichText = true, Text = "",
+    }, diagScroll)
+
+    local copyBtn = new("TextButton", {
+        Position = UDim2.new(0,0,1,-30), Size = UDim2.new(0,180,0,28),
+        BackgroundColor3 = C.acc, BorderSizePixel = 0, Font = Enum.Font.GothamBold,
+        TextSize = 10.5, TextColor3 = Color3.new(1,1,1),
+        Text = "COPIAR DIAGNOSTICO", AutoButtonColor = false,
+    }, pDiag)
+    corner(copyBtn, 7)
+    copyBtn.MouseButton1Click:Connect(function()
+        local set = setclipboard or toclipboard or (syn and syn.write_clipboard)
+        local plain = diagText:gsub("<[^>]->", "")
+        if set and pcall(set, plain) then
+            copyBtn.Text = "COPIADO ✓"
+        else
+            print("[EAG DIAG]\n" .. plain)
+            copyBtn.Text = "EN LA CONSOLA (F9)"
+        end
+        task.delay(2, function() copyBtn.Text = "COPIAR DIAGNOSTICO" end)
+    end)
+
     selectTab("result")
 end
 
@@ -1179,6 +1285,62 @@ RunService.RenderStepped:Connect(function(dt)
         listBody.Text = '<font color="#6c748a">este server no tenia huevos de zona resolubles</font>'
     else
         listBody.Text = '<font color="#6c748a">' .. table.concat(DIAG, "\n") .. '</font>'
+    end
+
+    -- ── diagnostico ────────────────────────────────────────────────────────
+    if diagBody then
+        local D = SCAN.diag or {}
+        local nAssets = 0; for _ in pairs(assetIndex) do nAssets = nAssets + 1 end
+        local L = {}
+        local function add(s) L[#L+1] = s end
+
+        add("MODULOS DEL JUEGO")
+        add(("  EggState   %s"):format(EggState   and "OK" or "NO CARGA  <-- sin esto no hay records"))
+        add(("  EggRecords %s"):format(EggRecords and "OK" or "NO CARGA"))
+        add(("  Data.Assets %s"):format(Assets    and "OK" or "NO CARGA  <-- sin esto no hay rarezas"))
+        add(("  assets indexados: %d   rarezas: %d   zonas: %d"):format(nAssets, #rarityList, #AREAS))
+        add("")
+        add("ULTIMO ESCANEO")
+        add(("  modelos de zona:   %d"):format(D.zone or 0))
+        add(("  modelos de base:   %d  (nunca se envian)"):format(SCAN.base or 0))
+        add(("  records leidos:    %d"):format(D.records or 0))
+        add(("  resueltos:         %d"):format(SCAN.found or 0))
+        add(("  descartados:       %d"):format(SCAN.skipped or 0))
+
+        if D.why and next(D.why) then
+            add("")
+            add("POR QUE SE DESCARTARON")
+            local ks = {}
+            for k in pairs(D.why) do ks[#ks+1] = k end
+            table.sort(ks)
+            for _, k in ipairs(ks) do add(("  %-28s %d"):format(k, D.why[k])) end
+        end
+
+        if D.sampleKeys then
+            add("")
+            add("CAMPOS DE UN RECORD REAL")
+            add("  " .. D.sampleKeys)
+            add("  DisplayName -> " .. tostring(D.sampleName))
+        elseif (D.zone or 0) > 0 then
+            add("")
+            add("  NINGUN record encontrado para los huevos de zona.")
+            add("  Es lo que hay que mirar: sin record no se puede saber la rareza.")
+        end
+
+        if D.misses and #D.misses > 0 then
+            add("")
+            add("EJEMPLOS QUE FALLARON")
+            for _, m in ipairs(D.misses) do add("  " .. m) end
+        end
+
+        if #DIAG > 0 then
+            add("")
+            add("ARRANQUE")
+            for _, d in ipairs(DIAG) do add("  " .. d) end
+        end
+
+        diagText = table.concat(L, "\n")
+        diagBody.Text = diagText
     end
 
     local nvis = 0; for _ in pairs(HOP.visited) do nvis = nvis + 1 end

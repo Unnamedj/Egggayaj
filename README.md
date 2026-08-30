@@ -46,6 +46,48 @@ En el **ESP** (tab HUB) y en el **AJ** (tab engranaje), pon la misma
 
 ---
 
+## El reporter no mandaba nada habiendo legendarios
+
+Me pasé de estricto. Al endurecer la resolución de rarezas rompí la resolución
+entera. Tres causas, la primera es la gorda:
+
+**1. Colisiones falsas.** `ReadFieldEggs()` y `ReadOwnerEggs()` devuelven el
+mismo huevo en **dos tablas distintas**. Yo comparaba por identidad de tabla,
+así que lo tomaba por dos records en conflicto y anulaba la clave. Resultado:
+ningún huevo se resolvía. Reproducido:
+
+```
+Un Legendary presente en las dos lecturas del juego:
+  v9 inicial   -> clave anulada  =>  no se resuelve  =>  no se envia
+  v9 corregido -> Salamander (Legendary)
+```
+
+Ahora la colisión se juzga por si los dos records **discrepan en el asset**, no
+por si son la misma tabla. Una colisión de verdad (`Slot_002` compartido por dos
+huevos distintos) se sigue detectando.
+
+**2. Quité campos que sí valían.** Saqué `Name` e `Id` de la lista de campos de
+asset sin comprobar que el juego no los usara. Los dumps que me pasaste nunca
+capturaron un record de huevo real —solo nombres de funciones—, así que endurecí
+contra nombres de campo que no había verificado. Están de vuelta.
+
+**3. Sin red de seguridad.** La búsqueda vuelve a ser amplia (mira todos los
+campos de texto), pero **determinista**: si varios apuntan al mismo asset, vale;
+si se contradicen, no se resuelve. El fallo original del v8 no era mirar campos
+de más, era que `pairs()` decidía el ganador.
+
+### Y dos cosas para que esto no se repita a ciegas
+
+- **No borra el hub.** Si hay huevos de zona delante y no se resuelve ninguno,
+  ya no manda un `full=true` vacío —eso le decía al hub «aquí no hay nada» y
+  borraba lo bueno de un reporte anterior—. No manda, y lo grita en el panel.
+- **Pestaña DIAGNOSTICO** con botón de copiar: estado de los tres módulos del
+  juego, cuántos modelos de zona hay, cuántos records se leyeron, por qué se
+  descartó cada huevo, y **los nombres de campo de un record real**. Eso último
+  es lo que faltaba para no seguir adivinando.
+
+---
+
 ## v9 / v4 — por qué el AJ no saltaba
 
 Tres fallos distintos, los tres reproducidos con test antes de tocar nada.
