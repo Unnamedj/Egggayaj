@@ -16,9 +16,9 @@
     es: null,
     seen: new Set(),
     tab: "eggs",
-    // El reloj del navegador y el del hub no tienen por que coincidir; todas
-    // las edades se calculan contra el "now" del hub mas lo que ha corrido
-    // el reloj local desde que llego la respuesta.
+    // The browser clock and the hub clock need not agree; every age is computed
+    // against the hub's "now" plus however far the local clock has moved since
+    // the response arrived.
     skew: 0,
     booted: false,
   };
@@ -32,7 +32,7 @@
     );
   }
 
-  // "hace 12s" / "hace 4m 03s" / "hace 2h 11m"
+  // "12s ago" / "4m 03s ago" / "2h 11m ago"
   function ago(ms) {
     if (ms == null || !isFinite(ms)) return "—";
     const s = Math.max(0, Math.floor(ms / 1000));
@@ -53,7 +53,7 @@
     );
   }
 
-  const fmt = (n) => (n == null ? "—" : Number(n).toLocaleString("es-ES"));
+  const fmt = (n) => (n == null ? "—" : Number(n).toLocaleString("en-US"));
 
   function copy(text, btn) {
     const done = () => {
@@ -115,7 +115,7 @@
     showGate("");
   };
 
-  // --------------------------------------------------------------- filtros
+  // --------------------------------------------------------------- filters
   function buildChips() {
     const box = $("chips");
     box.innerHTML = "";
@@ -150,8 +150,8 @@
       const mode = b.dataset.pick;
       state.rarities.clear();
       if (mode === "all") state.ladder.forEach((r) => state.rarities.add(r.name.toLowerCase()));
-      // "solo raras" = de Legendary (rank 5) para arriba, que es donde empieza
-      // lo que de verdad merece un salto.
+      // "rare only" = Legendary (rank 5) and up, where a jump actually starts
+      // being worth it.
       if (mode === "top") {
         state.ladder.filter((r) => r.rank >= 5).forEach((r) => state.rarities.add(r.name.toLowerCase()));
       }
@@ -209,7 +209,7 @@
         e.petName && e.petName !== e.name ? e.petName : null,
         e.area || null,
         e.earn ? e.earn + "/s" : null,
-        e.growth ? "eclosión " + e.growth : null,
+        e.growth ? "hatch " + e.growth : null,
       ].filter(Boolean).join(" · ");
 
       div.innerHTML = `
@@ -221,15 +221,15 @@
         <div class="kg" style="color:${c}">${fmt(e.kg)}<span class="dim" style="font-size:10px"> kg</span></div>
         <div class="col-srv">
           <div class="job" title="${esc(e.jobId)}">${esc(e.jobId)}</div>
-          <div class="sub">${e.players ?? "?"}/${e.maxPlayers || "?"} jug.${e.reporter ? " · " + esc(e.reporter) : ""}</div>
+          <div class="sub">${e.players ?? "?"}/${e.maxPlayers || "?"} players${e.reporter ? " · " + esc(e.reporter) : ""}</div>
         </div>
         <div class="col-age">
-          <div class="age ${e.ageMs < 60000 ? "hot" : ""}" data-at="${e.firstSeen}">hace ${ago(e.ageMs)}</div>
+          <div class="age ${e.ageMs < 60000 ? "hot" : ""}" data-at="${e.firstSeen}">${ago(e.ageMs)} ago</div>
           ${e.claimed ? '<span class="badge">claim</span>' : ""}
         </div>
         <div class="acts">
-          <button class="mini" data-a="job" title="Copiar Job ID">${ICON.copy}</button>
-          <button class="mini go" data-a="join" title="Copiar comando de join">${ICON.join}</button>
+          <button class="mini" data-a="job" title="Copy Job ID">${ICON.copy}</button>
+          <button class="mini go" data-a="join" title="Copy join command">${ICON.join}</button>
         </div>`;
 
       div.querySelector('[data-a="job"]').onclick = (ev) => copy(e.jobId, ev.currentTarget);
@@ -278,26 +278,26 @@
           <b>${esc(s.best.name)}</b>
           <span class="tag" style="background:${bc}">${esc(s.best.rarity)}</span>
           <span class="kg" style="color:${bc}">${fmt(s.best.kg)} kg</span>
-        </div>` : `<div class="srv-best"><span class="dim">sin huevos ahora mismo</span></div>`}
+        </div>` : `<div class="srv-best"><span class="dim">no eggs right now</span></div>`}
 
         <div class="srv-grid">
-          <div class="srv-cell"><b>${fmt(s.eggs)}</b><span>huevos</span></div>
+          <div class="srv-cell"><b>${fmt(s.eggs)}</b><span>eggs</span></div>
           <div class="srv-cell">
             <b>${s.players}<span class="dim" style="font-size:10px">/${s.maxPlayers || "?"}</span></b>
-            <span>jugadores</span>
+            <span>players</span>
             <div class="bars"><i class="${pct >= 100 ? "full" : ""}" style="width:${pct}%"></i></div>
           </div>
-          <div class="srv-cell"><b>${fmt(s.heaviestKg)}</b><span>kg máx</span></div>
+          <div class="srv-cell"><b>${fmt(s.heaviestKg)}</b><span>max kg</span></div>
         </div>
 
         ${mix ? `<div class="srv-mix">${mix}</div>` : ""}
 
         <div class="srv-foot">
-          <span title="Último reporte recibido">reporte <b class="age" data-at="${s.updatedAt}">hace ${ago(s.staleMs)}</b></span>
-          <span title="Tiempo desde el primer reporte">· vivo <span class="age" data-at="${s.firstSeen}" data-prefix="">${ago(s.aliveMs)}</span></span>
+          <span title="Last report received">report <b class="age" data-at="${s.updatedAt}">${ago(s.staleMs)} ago</b></span>
+          <span title="Time since the first report">· up <span class="age" data-at="${s.firstSeen}" data-prefix="">${ago(s.aliveMs)}</span></span>
           <div class="acts">
-            <button class="mini" data-a="job" title="Copiar Job ID">${ICON.copy}</button>
-            <button class="mini go" data-a="join" title="Copiar comando de join">${ICON.join}</button>
+            <button class="mini" data-a="job" title="Copy Job ID">${ICON.copy}</button>
+            <button class="mini go" data-a="join" title="Copy join command">${ICON.join}</button>
           </div>
         </div>`;
 
@@ -327,24 +327,24 @@
       case "egg": {
         const c = colorFor(e.rarity);
         return `<b style="color:${c}">${esc(e.name)}</b> ${esc(e.rarity)} · ${fmt(e.kg)} kg` +
-          `${e.area ? " · " + esc(e.area) : ""} en ${job}` +
-          `${e.reporter ? ` <span class="dim">por ${esc(e.reporter)}</span>` : ""}`;
+          `${e.area ? " · " + esc(e.area) : ""} on ${job}` +
+          `${e.reporter ? ` <span class="dim">by ${esc(e.reporter)}</span>` : ""}`;
       }
       case "server-up":
-        return `nuevo server ${job} · ${e.players ?? "?"}/${e.maxPlayers || "?"} jugadores` +
+        return `new server ${job} · ${e.players ?? "?"}/${e.maxPlayers || "?"} players` +
           `${e.reporter ? ` <span class="dim">— ${esc(e.reporter)}</span>` : ""}`;
       case "server-down":
-        return `server ${job} dejó de reportar <span class="dim">(${fmt(e.eggs)} huevos perdidos)</span>`;
+        return `server ${job} stopped reporting <span class="dim">(${fmt(e.eggs)} eggs lost)</span>`;
       case "claim":
-        return `<b>${esc(e.by || "?")}</b> reservó ${job} · ${esc(e.name || "")} ${fmt(e.kg)} kg`;
+        return `<b>${esc(e.by || "?")}</b> claimed ${job} · ${esc(e.name || "")} ${fmt(e.kg)} kg`;
       case "release":
-        return `claim liberado en ${job}`;
+        return `claim released on ${job}`;
       case "hop":
         return e.ok
-          ? `<b style="color:#34d399">salto ok</b> a ${job}${e.by ? " · " + esc(e.by) : ""}`
-          : `<b style="color:#fb5f78">salto falló</b> en ${job}${e.reason ? " · " + esc(e.reason) : ""}`;
+          ? `<b style="color:#34d399">hop ok</b> to ${job}${e.by ? " · " + esc(e.by) : ""}`
+          : `<b style="color:#fb5f78">hop failed</b> on ${job}${e.reason ? " · " + esc(e.reason) : ""}`;
       case "purge":
-        return `hub vaciado (${fmt(e.servers)} servers)`;
+        return `hub purged (${fmt(e.servers)} servers)`;
       default:
         return esc(e.kind);
     }
@@ -361,7 +361,7 @@
       const row = document.createElement("div");
       row.className = "ev";
       row.innerHTML =
-        `<div class="ev-time" title="${clock(e.at)}"><span class="age" data-at="${e.at}">hace ${ago(hubNow() - e.at)}</span></div>` +
+        `<div class="ev-time" title="${clock(e.at)}"><span class="age" data-at="${e.at}">${ago(hubNow() - e.at)} ago</span></div>` +
         `<i class="ev-dot" style="background:${meta.color};color:${meta.color}"></i>` +
         `<div class="ev-txt">${eventText(e)}</div>`;
       frag.appendChild(row);
@@ -375,7 +375,7 @@
       (a, b) => (rankOf(b[0]) - rankOf(a[0])) || (b[1] - a[1])
     );
     if (!entries.length) {
-      $("dist").innerHTML = '<span class="dim">sin datos aún</span>';
+      $("dist").innerHTML = '<span class="dim">no data yet</span>';
       return;
     }
     const max = Math.max(1, ...entries.map((e) => e[1]));
@@ -395,18 +395,18 @@
     return hit ? hit.rank : 0;
   }
 
-  // Repinta solo los textos "hace X" sin volver a pedir nada al hub. Es lo que
-  // hace que el dashboard se sienta vivo entre refrescos.
+  // Repaints just the "X ago" labels without asking the hub for anything. This
+  // is what makes the dashboard feel alive between refreshes.
   function tickAges() {
     const now = hubNow();
     document.querySelectorAll(".age[data-at]").forEach((el) => {
       const at = Number(el.dataset.at);
       if (!at) return;
       const d = now - at;
-      // data-prefix="" para las que no son un "hace X" (p.ej. "vivo 4m"), que
-      // si no se quedaban congeladas y podian leerse mas cortas que el reporte.
-      const prefix = el.dataset.prefix === undefined ? "hace " : el.dataset.prefix;
-      el.textContent = prefix + ago(d);
+      // data-prefix="" for labels that are not an "X ago" (e.g. "up 4m"), which
+      // otherwise froze and could read shorter than the report age.
+      const suffix = el.dataset.prefix === undefined ? " ago" : el.dataset.prefix;
+      el.textContent = ago(d) + suffix;
       el.classList.toggle("hot", d < 60000);
     });
   }
@@ -415,7 +415,7 @@
     const p = $("conn");
     p.classList.toggle("on", !!ok);
     p.classList.toggle("off", !ok);
-    p.querySelector("span").textContent = label || (ok ? "en vivo" : "sin conexión");
+    p.querySelector("span").textContent = label || (ok ? "live" : "offline");
   }
 
   // -------------------------------------------------------------- fetch
@@ -463,7 +463,7 @@
       setConn(true);
       state.booted = true;
     } catch (e) {
-      if (String(e.message) === "401") return showGate("Key inválida.");
+      if (String(e.message) === "401") return showGate("Invalid key.");
       setConn(false);
     } finally {
       busy = false;
@@ -471,8 +471,8 @@
     }
   }
 
-  // Refresco agrupado: el hub puede emitir muchos eventos seguidos y no vale
-  // la pena pedir el feed entero por cada uno.
+  // Coalesced refresh: the hub can emit many events in a row and it is not
+  // worth fetching the whole feed for each one.
   let burst = null;
   function nudge() {
     if (!$("live").checked) return;
@@ -490,7 +490,7 @@
     es.addEventListener("hello", () => setConn(true));
     ["eggs", "egg", "gone", "claim", "release", "hop", "server-up", "server-down", "purge"]
       .forEach((t) => es.addEventListener(t, nudge));
-    es.onerror = () => setConn(false, "reconectando");
+    es.onerror = () => setConn(false, "reconnecting");
   }
 
   // --------------------------------------------------------------- tabs
@@ -531,12 +531,12 @@
       connectStream();
       await refresh();
     } catch (e) {
-      showGate(fromGate || state.key ? "Key inválida." : "");
+      showGate(fromGate || state.key ? "Invalid key." : "");
     }
   }
 
   setInterval(tickAges, 1000);
-  // Red de seguridad por si el SSE se cae sin avisar.
+  // Safety net in case the SSE drops without saying so.
   setInterval(() => { if ($("live").checked && !document.hidden) refresh(); }, 15000);
 
   boot(false);

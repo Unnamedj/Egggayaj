@@ -84,11 +84,11 @@ function authed(req, url) {
   return keyOf(req, url) === API_KEY;
 }
 
-// Normaliza lo que llega en un campo de lista. Lua no distingue array de
-// diccionario, asi que una tabla vacia puede llegar como [] o como {} segun el
-// executor. Un valor que no sea una lista usable significa "sin filtro":
-// convertirlo en texto daba '[object Object]', un filtro que no casaba con nada
-// y dejaba al AJ mudo sin decir por que.
+// Normalises whatever arrives in a list field. Lua does not distinguish array
+// from dictionary, so an empty table can arrive as [] or {} depending on the
+// executor. A value that is not a usable list means "no filter": stringifying
+// it gave '[object Object]', a filter that matched nothing and left the AJ
+// silent without saying why.
 function toList(v) {
   if (v == null) return null;
   if (Array.isArray(v)) {
@@ -134,7 +134,7 @@ function filterFromQuery(q) {
   };
 }
 
-// Los mismos filtros pero llegando por el cuerpo de un POST (lo que manda el AJ).
+// The same filters, arriving in a POST body (what the AJ sends).
 function applyBodyFilter(filter, body) {
   if (!body) return filter;
   if (body.rarities != null) filter.rarities = parseList(body.rarities);
@@ -242,10 +242,10 @@ function sse(req, res) {
 
 // ------------------------------------------------------------------- routes
 const server = http.createServer(async (req, res) => {
-  // Una HUB_URL pegada con barra final produce "//api/meta". Hay que arreglarlo
-  // ANTES de construir la URL: "//algo" es una URL relativa a protocolo, asi que
-  // el parser toma "api" como host y deja la ruta en "/meta". El resultado era
-  // un 404 que parecia que el hub estuviera caido.
+  // A HUB_URL pasted with a trailing slash produces "//api/meta". It has to be
+  // fixed BEFORE building the URL: "//something" is a protocol-relative URL, so
+  // the parser takes "api" as the host and leaves the path as "/meta". The
+  // result was a 404 that looked like the hub was down.
   const rawUrl = String(req.url || "/").replace(/^\/+/, "/");
   const url = new URL(rawUrl, `http://${req.headers.host || "localhost"}`);
   const p = url.pathname.replace(/\/{2,}/g, "/").replace(/\/+$/, "") || "/";
@@ -290,8 +290,8 @@ const server = http.createServer(async (req, res) => {
 
       if (waitSec > 0) {
         const deadline = Date.now() + waitSec * 1000;
-        // El cursor (since / sinceSeq) se respeta tambien aqui: si el cliente
-        // pidio "solo lo nuevo", esperar no debe devolverle el historico.
+        // The cursor (since / sinceSeq) is honoured here too: if the client
+        // asked for "only what is new", waiting must not hand back history.
         while (store.match(f).length === 0 && Date.now() < deadline) {
           const changed = await waitForChange(req, deadline - Date.now());
           if (!changed) break;

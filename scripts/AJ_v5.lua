@@ -1,19 +1,18 @@
 --[[ ─────────────────────────────────────────────────────────────────────────
      SAE · AUTO JOINER  v5   ·   by joszz
-     Panel: Right Control (PC)  ·  boton flotante (movil)
+     Panel: Right Control (PC)  ·  floating button (mobile)
 
-     Novedades del v5:
+     What is new in v5:
 
-       · Interfaz rehecha: pestañas con indicador deslizante, tarjetas con
-         profundidad, entradas escalonadas, pulsaciones con rebote.
-       · Funciona en movil y en PC: el panel se escala solo al viewport y hay
-         un boton flotante arrastrable para abrirlo sin teclado.
-       · Los hallazgos viejos SE MUESTRAN, marcados, pero el auto join no va a
-         por ellos. Puedes unirte tu a mano si quieres.
-       · Banner "UNIENDOSE A ..." al saltar, visible aunque el panel este
-         cerrado.
-       · Al aterrizar, la GUI enseña IN THE SERVER con el huevo por el que
-         viniste. Sobrevive al teleport.
+       · Rebuilt interface: sliding tab indicator, cards with depth, staggered
+         entries, press bounce.
+       · Works on mobile and PC: the panel scales itself to the viewport and a
+         draggable floating button opens it without a keyboard.
+       · Stale finds ARE shown, tagged, but auto join will not go for them.
+         You can still join them yourself.
+       · "JOINING ..." banner on hop, visible even with the panel closed.
+       · On landing, the GUI shows IN THE SERVER with the egg that brought you
+         there. It survives the teleport.
      ───────────────────────────────────────────────────────────────────────── ]]
 
 local CFG = {
@@ -25,7 +24,7 @@ local CFG = {
     COOLDOWN   = 8,
     MIN_KG     = 0,
     MAX_KG     = 0,
-    MAX_AGE    = 120,      -- s. Mas viejo que esto: se ve, pero no se salta solo
+    MAX_AGE    = 120,      -- s. Older than this: still shown, never auto-joined
     RARITIES   = { "Legendary", "Mythic", "Cosmic", "Secret", "Exotic",
                    "Eternal", "Divine", "Titan" },
     HAS_SLOT   = true,
@@ -34,7 +33,7 @@ local CFG = {
     _schema    = 3,
 }
 
--- ───────────────────────────────────────────────────────────────── servicios
+-- ────────────────────────────────────────────────────────────────── services
 local Players = game:GetService("Players")
 local TPS     = game:GetService("TeleportService")
 local UIS     = game:GetService("UserInputService")
@@ -48,7 +47,7 @@ local httpreq = (syn and syn.request) or (fluxus and fluxus.request)
 
 local IS_TOUCH = UIS.TouchEnabled and not UIS.KeyboardEnabled
 
--- ───────────────────────────────────────────────────────────────────── paleta
+-- ─────────────────────────────────────────────────────────────────── palette
 local C = {
     bg     = Color3.fromRGB(11, 12, 18),
     bg2    = Color3.fromRGB(16, 18, 26),
@@ -110,7 +109,7 @@ local ST = {
     diag       = nil,
     logs       = {},
     lastErr    = nil,
-    inServer   = nil,   -- el huevo por el que aterrizamos aqui
+    inServer   = nil,   -- the egg that landed us here
     seenUids   = {},
 }
 local autoOn = false
@@ -135,7 +134,7 @@ end
 
 local function load()
     if not canFile then return end
-    -- Recoge tambien los ajustes del v4 para no perder la URL ni la key.
+    -- Also picks up v4 settings so the URL and key are not lost.
     local src = isfile(FILE) and FILE or (isfile("eag_aj_v4.json") and "eag_aj_v4.json") or nil
     if not src then return end
     local migrated = false
@@ -161,28 +160,28 @@ local function hubBase()
 end
 
 local function httpJson(method, path, body)
-    if not httpreq then return nil, "el executor no tiene request()" end
+    if not httpreq then return nil, "the executor has no request()" end
     local base = hubBase()
-    if base == "" then return nil, "falta la URL del hub (AJUSTES)" end
+    if base == "" then return nil, "hub URL is missing (SETTINGS)" end
     local opts = {
         Url = base .. path, Method = method,
         Headers = { ["Content-Type"] = "application/json", ["x-eag-key"] = CFG.KEY },
     }
     if body then opts.Body = HS:JSONEncode(body) end
     local ok, res = pcall(httpreq, opts)
-    if not ok then return nil, "sin red" end
+    if not ok then return nil, "no network" end
     local code = res.StatusCode or res.Status or 0
-    if code == 401 then return nil, "API key incorrecta" end
-    if code == 404 then return nil, "404 · revisa la URL del hub" end
+    if code == 401 then return nil, "wrong API key" end
+    if code == 404 then return nil, "404 · check the hub URL" end
     if code < 200 or code >= 300 then return nil, "HTTP " .. tostring(code) end
     local dok, dec = pcall(function() return HS:JSONDecode(res.Body) end)
-    if not dok then return nil, "respuesta ilegible" end
+    if not dok then return nil, "unreadable response" end
     if type(dec) == "table" and tonumber(dec.eggSeq) then ST.eggSeq = tonumber(dec.eggSeq) end
     return dec
 end
 
--- El filtro base. `forJoin` añade el corte por edad: la lista lo enseña TODO,
--- pero el salto automatico solo va a por lo fresco.
+-- The base filter. `forJoin` adds the age cut-off: the list shows EVERYTHING,
+-- while auto join only goes for what is fresh.
 local function filterBody(forJoin)
     local b = { client = CFG.CLIENT, minKg = tonumber(CFG.MIN_KG) or 0, hasSlot = CFG.HAS_SLOT }
     if #CFG.RARITIES > 0 then b.rarities = CFG.RARITIES end
@@ -233,7 +232,7 @@ local function tw(obj, info, props)
     return t
 end
 
--- Rebote al pulsar. Da sensacion tactil, que en movil se agradece.
+-- Press bounce. Gives a tactile feel, which matters most on mobile.
 local function pressable(btn, scaleDown)
     local s = mk("UIScale", { Scale = 1 }, btn)
     local down = scaleDown or 0.94
@@ -286,8 +285,8 @@ corner(root, 16)
 stroke(root, C.line, 0.2)
 grad(root, 125, Color3.fromRGB(26, 22, 46), Color3.fromRGB(10, 11, 17))
 
--- El panel se encoge para caber en cualquier pantalla, movil incluido, sin
--- tener que mantener dos maquetaciones distintas.
+-- The panel shrinks to fit any screen, mobile included, without having to
+-- maintain two separate layouts.
 local uiScale = mk("UIScale", { Scale = 1 }, root)
 local function fitViewport()
     local cam = workspace.CurrentCamera
@@ -303,7 +302,7 @@ task.spawn(function()
     if cam then cam:GetPropertyChangedSignal("ViewportSize"):Connect(fitViewport) end
 end)
 
--- ── cabecera ──────────────────────────────────────────────────────────────
+-- ── header ────────────────────────────────────────────────────────────────
 local header = mk("Frame", { Size = UDim2.new(1,0,0,48), BackgroundTransparency = 1 }, root)
 mk("Frame", {
     Position = UDim2.new(0,0,1,-1), Size = UDim2.new(1,0,0,1),
@@ -325,7 +324,7 @@ end
 
 label(header, "SAE", 46, 9, 34, 16, 14, C.acc2, Enum.Font.GothamBold)
 label(header, "AUTO JOINER", 80, 9, 170, 16, 14, C.txt, Enum.Font.GothamBold)
-local subLbl = label(header, "conectando con el hub", 46, 26, 300, 13, 10.5, C.mut)
+local subLbl = label(header, "connecting to the hub", 46, 26, 300, 13, 10.5, C.mut)
 
 local connPill = mk("Frame", {
     Position = UDim2.new(1,-190,0,14), Size = UDim2.new(0,142,0,22),
@@ -340,10 +339,10 @@ round(connDot)
 local connLbl = mk("TextLabel", {
     Position = UDim2.new(0,22,0,0), Size = UDim2.new(1,-28,1,0),
     BackgroundTransparency = 1, Font = Enum.Font.GothamMedium, TextSize = 10.5,
-    TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = C.txt2, Text = "conectando",
+    TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = C.txt2, Text = "connecting",
 }, connPill)
 
--- Latido del punto de conexion: se nota vivo sin gastar nada.
+-- Connection dot heartbeat: reads as alive and costs nothing.
 task.spawn(function()
     while connDot.Parent do
         tw(connDot, TweenInfo.new(0.85, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
@@ -375,7 +374,7 @@ do
     end)
 end
 
--- ── pestañas con indicador deslizante ─────────────────────────────────────
+-- ── tabs with a sliding indicator ─────────────────────────────────────────
 local TAB_W, TAB_GAP = 126, 4
 local tabBar = mk("Frame", {
     Position = UDim2.new(0,14,0,58), Size = UDim2.new(1,-28,0,32),
@@ -421,10 +420,10 @@ local function mkTab(i, key, text, tip)
     end)
     return b
 end
-mkTab(1, "hunt",   "CAZA",    "objetivos en vivo y salto automatico")
-mkTab(2, "filter", "FILTROS", "rareza, peso y frescura")
-mkTab(3, "config", "AJUSTES", "conexion con el hub y ritmo")
-mkTab(4, "log",    "LOG",     "registro de actividad")
+mkTab(1, "hunt",   "HUNT",    "live targets and auto join")
+mkTab(2, "filter", "FILTERS", "rarity, weight and freshness")
+mkTab(3, "config", "SETTINGS", "hub connection and pacing")
+mkTab(4, "log",    "LOG",     "activity log")
 
 selectTab = function(key)
     for i, k in ipairs(order) do
@@ -444,8 +443,8 @@ selectTab = function(key)
     end
 end
 
--- ───────────────────────────────────────────────────────────── banner de salto
--- Vive fuera del panel: se ve aunque lo tengas cerrado.
+-- ───────────────────────────────────────────────────────────────── hop banner
+-- Lives outside the panel: visible even when the panel is closed.
 local banner = mk("Frame", {
     AnchorPoint = Vector2.new(0.5, 0),
     Position = UDim2.new(0.5, 0, 0, -80),
@@ -462,7 +461,7 @@ local bannerBar = mk("Frame", {
     BackgroundColor3 = C.acc, BorderSizePixel = 0,
 }, banner)
 corner(bannerBar, 2)
-local bannerTitle = label(banner, "UNIENDOSE A", 16, 10, 200, 13, 9.5, C.acc2, Enum.Font.GothamBold)
+local bannerTitle = label(banner, "JOINING", 16, 10, 200, 13, 9.5, C.acc2, Enum.Font.GothamBold)
 local bannerName  = label(banner, "", 16, 25, 250, 18, 14, C.txt, Enum.Font.GothamBold)
 bannerName.TextTruncate = Enum.TextTruncate.AtEnd
 local bannerTag = mk("TextLabel", {
@@ -471,7 +470,7 @@ local bannerTag = mk("TextLabel", {
     TextXAlignment = Enum.TextXAlignment.Right, TextColor3 = C.mut, Text = "",
 }, banner)
 
--- Barra de progreso que se vacia: da idea de que el teleport esta en marcha.
+-- A progress bar that drains: signals the teleport is under way.
 local bannerProg = mk("Frame", {
     Position = UDim2.new(0,0,1,-3), Size = UDim2.new(1,0,0,3),
     BackgroundColor3 = C.acc, BorderSizePixel = 0, BackgroundTransparency = 0.25,
@@ -525,13 +524,13 @@ local function reportHop(jobId, ok, reason)
     end)
 end
 
-local layoutHunt   -- se define con la pagina CAZA
+local layoutHunt   -- defined with the HUNT page
 local paintInServer
 
 local function doHop(target)
     if not target or not target.jobId then return end
     if target.jobId == game.JobId then
-        pushLog("ya estas en ese server", C.warn)
+        pushLog("you are already on that server", C.warn)
         return
     end
     ST.lastHop = os.clock()
@@ -539,12 +538,12 @@ local function doHop(target)
     if tonumber(target.seq) then ST.cursor = math.max(ST.cursor or 0, tonumber(target.seq)) end
 
     showBanner(target)
-    pushLog(("salto -> %s · %s %s kg"):format(
+    pushLog(("hop -> %s · %s %s kg"):format(
         tostring(target.name), tostring(target.rarity),
         tostring(math.floor(tonumber(target.kg) or 0))), C.acc2)
 
-    -- Se guarda el huevo entero, no solo el jobId: al aterrizar la GUI necesita
-    -- saber POR QUE vino aqui para enseñar el IN THE SERVER.
+    -- The whole egg is stored, not just the jobId: on landing the GUI needs to
+    -- know WHY it came here in order to show IN THE SERVER.
     if canFile then
         pcall(function()
             writefile(PENDING, HS:JSONEncode({
@@ -565,14 +564,14 @@ local function doHop(target)
     end)
     if not ok then
         ST.fails = ST.fails + 1
-        pushLog("fallo el teleport: " .. tostring(err), C.bad)
+        pushLog("teleport failed: " .. tostring(err), C.bad)
         reportHop(target.jobId, false, tostring(err))
     end
 end
 
 TPS.TeleportInitFailed:Connect(function(_, result, msg)
     ST.fails = ST.fails + 1
-    pushLog("teleport rechazado: " .. tostring(msg), C.bad)
+    pushLog("teleport rejected: " .. tostring(msg), C.bad)
     if canFile and isfile(PENDING) then
         pcall(function()
             local t = HS:JSONDecode(readfile(PENDING))
@@ -582,8 +581,8 @@ TPS.TeleportInitFailed:Connect(function(_, result, msg)
     end
 end)
 
--- ═══════════════════════════════════════════════════════════════════════ CAZA
--- IN THE SERVER: el huevo por el que aterrizamos aqui.
+-- ═══════════════════════════════════════════════════════════════════════ HUNT
+-- IN THE SERVER: the egg that landed us here.
 local inCard = mk("Frame", {
     Size = UDim2.new(1,0,0,46), BackgroundColor3 = C.card,
     BorderSizePixel = 0, Visible = false,
@@ -604,7 +603,7 @@ local inTag = mk("TextLabel", {
     TextXAlignment = Enum.TextXAlignment.Right, TextColor3 = C.mut, Text = "",
 }, inCard)
 
--- fila superior: interruptor + contadores
+-- top row: switch + counters
 local topRow = mk("Frame", { Size = UDim2.new(1,0,0,62), BackgroundTransparency = 1 }, pgHunt)
 
 local autoCard = mk("Frame", {
@@ -612,12 +611,12 @@ local autoCard = mk("Frame", {
 }, topRow)
 corner(autoCard, 12)
 local autoStroke = stroke(autoCard, C.line, 0.5)
-label(autoCard, "SALTO AUTOMATICO", 15, 12, 170, 14, 11, C.txt, Enum.Font.GothamBold)
+label(autoCard, "AUTO JOIN", 15, 12, 170, 14, 11, C.txt, Enum.Font.GothamBold)
 local autoSub = mk("TextLabel", {
     Position = UDim2.new(0,15,0,29), Size = UDim2.new(0,150,0,24),
     BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10.5,
     TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
-    TextColor3 = C.mut, TextWrapped = true, Text = "en pausa",
+    TextColor3 = C.mut, TextWrapped = true, Text = "paused",
 }, autoCard)
 
 local sw = mk("TextButton", {
@@ -644,14 +643,14 @@ local function paintAuto()
     })
     tw(knobGlow, EASE.out, { Transparency = autoOn and 0.4 or 1 })
     swStroke.Transparency = autoOn and 1 or 0.35
-    autoSub.Text = autoOn and "buscando objetivos frescos" or "en pausa"
+    autoSub.Text = autoOn and "looking for fresh targets" or "paused"
     tw(autoSub, EASE.fast, { TextColor3 = autoOn and C.ok or C.mut })
 end
 
 sw.MouseButton1Click:Connect(function()
     autoOn = not autoOn
     if autoOn and CFG.ONLY_NEW then ST.cursor = ST.eggSeq end
-    pushLog(autoOn and "auto join ON" or "auto join en pausa", autoOn and C.ok or C.mut)
+    pushLog(autoOn and "auto join ON" or "auto join paused", autoOn and C.ok or C.mut)
     paintAuto()
 end)
 pressable(sw, 0.96)
@@ -659,7 +658,7 @@ pressable(sw, 0.96)
 local statCards = {}
 do
     local x = 250
-    for _, spec in ipairs({ {"servers","SERVERS"}, {"matches","OBJETIVOS"}, {"hops","SALTOS"} }) do
+    for _, spec in ipairs({ {"servers","SERVERS"}, {"matches","TARGETS"}, {"hops","HOPS"} }) do
         local f = mk("Frame", {
             Position = UDim2.new(0,x,0,0), Size = UDim2.new(0,90,0,62),
             BackgroundColor3 = C.card, BorderSizePixel = 0,
@@ -679,7 +678,7 @@ do
     end
 end
 
--- banda de diagnostico
+-- diagnostics banner
 local diagCard = mk("Frame", {
     Size = UDim2.new(1,0,0,44), BackgroundColor3 = C.card,
     BorderSizePixel = 0, Visible = false,
@@ -706,7 +705,7 @@ corner(diagBtn, 8); stroke(diagBtn, C.line, 0.4); pressable(diagBtn)
 local diagAction = nil
 diagBtn.MouseButton1Click:Connect(function() if diagAction then diagAction() end end)
 
-local listLabel = caption(pgHunt, "OBJETIVOS EN VIVO", 2, 0, 220)
+local listLabel = caption(pgHunt, "LIVE TARGETS", 2, 0, 220)
 local list = mk("ScrollingFrame", {
     Size = UDim2.new(1,0,1,0), BackgroundTransparency = 1, BorderSizePixel = 0,
     ScrollBarThickness = 3, ScrollBarImageColor3 = C.line,
@@ -718,10 +717,10 @@ mk("UIListLayout", { Padding = UDim.new(0,6), SortOrder = Enum.SortOrder.LayoutO
 local emptyLbl = mk("TextLabel", {
     Size = UDim2.new(1,0,0,52), BackgroundTransparency = 1,
     Font = Enum.Font.Gotham, TextSize = 11.5, TextColor3 = C.mut, TextWrapped = true,
-    Text = "sin objetivos",
+    Text = "no targets",
 }, list)
 
--- Las tarjetas de arriba aparecen y desaparecen, asi que la lista se recoloca.
+-- The top cards come and go, so the list repositions itself.
 layoutHunt = function(animate)
     local y = 0
     local function place(obj, h)
@@ -759,23 +758,23 @@ paintInServer = function()
     layoutHunt(true)
 end
 
--- Al arrancar: ¿venimos de un salto? Entonces enseña IN THE SERVER.
+-- On start: did we arrive from a hop? Then show IN THE SERVER.
 task.spawn(function()
     if canFile and isfile(PENDING) then
         local ok, t = pcall(function() return HS:JSONDecode(readfile(PENDING)) end)
         if ok and t and t.jobId then
             local landed = (t.jobId == game.JobId)
-            reportHop(t.jobId, landed, landed and "ok" or "aterrizo en otro server")
+            reportHop(t.jobId, landed, landed and "ok" or "landed on a different server")
             if landed then
                 ST.inServer = {
                     name = t.name, rarity = t.rarity, kg = t.kg,
                     area = t.area, uid = t.uid, at = t.at,
                 }
-                pushLog(("aterrizaje confirmado · %s"):format(tostring(t.name or "?")), C.ok)
+                pushLog(("landing confirmed · %s"):format(tostring(t.name or "?")), C.ok)
                 task.wait(0.4)
                 pcall(paintInServer)
             else
-                pushLog("aterrizo en otro server", C.warn)
+                pushLog("landed on a different server", C.warn)
             end
         end
         pcall(function() if delfile then delfile(PENDING) end end)
@@ -801,15 +800,15 @@ local function buildRow(e, i, isNew)
         stale and C.txt2 or C.txt, Enum.Font.GothamMedium)
     nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
 
-    local sub = ("%s · %s · %s/%s jug · hace %s"):format(
+    local sub = ("%s · %s · %s/%s players · %s ago"):format(
         tostring(e.rarity),
-        (e.area ~= nil and e.area ~= "" and e.area or "zona"),
+        (e.area ~= nil and e.area ~= "" and e.area or "zone"),
         tostring(e.players or "?"), tostring(e.maxPlayers or "?"), ago(e.ageMs))
     local subLblRow = label(row, sub, 14, 23, 250, 14, 10, C.mut)
     subLblRow.TextTruncate = Enum.TextTruncate.AtEnd
 
-    -- Las etiquetas se colocan de derecha a izquierda con un cursor: si no, un
-    -- huevo viejo Y en uso a la vez las superponia.
+    -- Tags are laid out right to left from a cursor: otherwise an egg that was
+    -- both stale AND in use overlapped them.
     local rx = 70 + 72
     local kgTag = mk("Frame", {
         Position = UDim2.new(1,-rx,0,13), Size = UDim2.new(0,72,0,20),
@@ -823,7 +822,7 @@ local function buildRow(e, i, isNew)
         Text = ("%s kg"):format(tostring(math.floor((tonumber(e.kg) or 0) + 0.5))),
     }, kgTag)
 
-    -- Marca de viejo: se ve, pero el auto join no ira a por el.
+    -- Stale marker: still shown, but auto join will not take it.
     if stale then
         rx = rx + 6 + 48
         local tag = mk("Frame", {
@@ -833,7 +832,7 @@ local function buildRow(e, i, isNew)
         round(tag); stroke(tag, C.mut, 0.6)
         mk("TextLabel", {
             Size = UDim2.new(1,0,1,0), BackgroundTransparency = 1,
-            Font = Enum.Font.GothamBold, TextSize = 9.5, TextColor3 = C.mut, Text = "viejo",
+            Font = Enum.Font.GothamBold, TextSize = 9.5, TextColor3 = C.mut, Text = "stale",
         }, tag)
     end
 
@@ -842,11 +841,11 @@ local function buildRow(e, i, isNew)
         mk("TextLabel", {
             Position = UDim2.new(1,-rx,0,13), Size = UDim2.new(0,46,0,20),
             BackgroundTransparency = 1, Font = Enum.Font.GothamMedium, TextSize = 9.5,
-            TextColor3 = C.warn, Text = "en uso",
+            TextColor3 = C.warn, Text = "in use",
         }, row)
     end
 
-    -- El texto se recorta justo antes de la primera etiqueta, sin pisarla.
+    -- Text is clipped just before the first tag, never overlapping it.
     nameLbl.Size = UDim2.new(1, -(rx + 22), 0, 16)
     subLblRow.Size = UDim2.new(1, -(rx + 22), 0, 14)
 
@@ -858,7 +857,7 @@ local function buildRow(e, i, isNew)
     corner(cp, 7); pressable(cp)
     cp.MouseButton1Click:Connect(function()
         local set = setclipboard or toclipboard or (syn and syn.write_clipboard)
-        if set then pcall(set, tostring(e.jobId)); pushLog("job id copiado", C.mut) end
+        if set then pcall(set, tostring(e.jobId)); pushLog("job id copied", C.mut) end
     end)
 
     local join = mk("TextButton", {
@@ -879,15 +878,15 @@ local function buildRow(e, i, isNew)
         tw(rs, EASE.fast, { Color = C.line, Transparency = 0.55 })
     end)
 
-    -- La lista se repinta cada poll, asi que solo se anima lo que de verdad es
-    -- nuevo: si no, todo entraria en cascada cada 4 segundos y mareaba.
+    -- The list repaints every poll, so only genuinely new rows animate: else
+    -- everything cascaded in every 4 seconds and it was dizzying.
     local restTr = stale and 0.35 or 0
     if isNew then
         task.delay(math.min(i, 12) * 0.03, function()
             if not row.Parent then return end
             tw(row, EASE.out, { BackgroundTransparency = restTr })
             tw(rs, EASE.out, { Transparency = 0.55 })
-            -- destello del color de su rareza, para pillarlo de reojo
+            -- a flash in its rarity colour, to catch the eye
             local flash = mk("Frame", {
                 Size = UDim2.new(1,0,1,0), BackgroundColor3 = col,
                 BackgroundTransparency = 0.72, BorderSizePixel = 0, ZIndex = 0,
@@ -932,43 +931,43 @@ local function paintDiag()
     emptyLbl.Visible = true
 
     if not ST.connected then
-        show("sin conexion con el hub", tostring(ST.lastErr or "no responde"), C.bad)
-        emptyLbl.Text = "revisa la URL y la API key en AJUSTES"
+        show("no connection to the hub", tostring(ST.lastErr or "not responding"), C.bad)
+        emptyLbl.Text = "check the URL and API key under SETTINGS"
         layoutHunt(true); return
     end
     if not d then
         diagCard.Visible = false
-        emptyLbl.Text = "consultando al hub…"
+        emptyLbl.Text = "asking the hub…"
         layoutHunt(true); return
     end
     if (tonumber(d.passed) or 0) > 0 then
         diagCard.Visible = false
-        emptyLbl.Text = ("%d objetivo(s) disponibles · tomando…"):format(d.passed)
+        emptyLbl.Text = ("%d target(s) available · claiming…"):format(d.passed)
         layoutHunt(true); return
     end
     if d.servers == 0 then
-        show("ningun reporter esta enviando", "el hub esta vacio", C.warn)
-        emptyLbl.Text = "esperando a que algun reporter suba huevos"
+        show("no reporter is sending", "the hub is empty", C.warn)
+        emptyLbl.Text = "waiting for a reporter to upload eggs"
         layoutHunt(true); return
     end
     if d.rarityFilterUnknown then
-        show("tus rarezas no existen en el juego",
-            "ninguna coincide con la lista real", C.bad,
-            "MARCAR LAS RARAS", function()
+        show("your rarities do not exist in the game",
+            "none of them match the real list", C.bad,
+            "SELECT THE RARE ONES", function()
                 CFG.RARITIES = {}
                 for _, r in ipairs(ST.ladder) do
                     if (tonumber(r.rank) or 0) >= 5 then table.insert(CFG.RARITIES, r.name) end
                 end
                 save()
-                pushLog("filtro de rarezas rehecho", C.ok)
+                pushLog("rarity filter rebuilt", C.ok)
             end)
-        emptyLbl.Text = "arregla el filtro de rarezas"
+        emptyLbl.Text = "fix the rarity filter"
         layoutHunt(true); return
     end
     if d.total == 0 then
-        show("los servers estan vacios",
-            ("%d reportando, 0 huevos ahora mismo"):format(d.servers), C.warn)
-        emptyLbl.Text = "esperando huevos"
+        show("the servers are empty",
+            ("%d reporting, 0 eggs right now"):format(d.servers), C.warn)
+        emptyLbl.Text = "waiting for eggs"
         layoutHunt(true); return
     end
     if d.top then
@@ -976,21 +975,21 @@ local function paintDiag()
         for reason, n in pairs(d.drops or {}) do bits[#bits+1] = ("%d %s"):format(n, reason) end
         table.sort(bits)
         local btnText, action
-        if d.top.reason == "rareza no marcada" then
-            btnText, action = "IR A FILTROS", function() selectTab("filter") end
-        elseif d.top.reason == "anterior al cursor" then
-            btnText, action = "ACEPTAR LOS DE AHORA", function()
+        if d.top.reason == "rarity not selected" then
+            btnText, action = "GO TO FILTERS", function() selectTab("filter") end
+        elseif d.top.reason == "before cursor" then
+            btnText, action = "ACCEPT CURRENT ONES", function()
                 ST.cursor = 0
-                pushLog("cursor a cero", C.warn)
+                pushLog("cursor reset to zero", C.warn)
             end
         end
-        show(("%d huevos en el hub, ninguno encaja"):format(d.total),
+        show(("%d eggs in the hub, none match"):format(d.total),
             table.concat(bits, "  ·  "), C.warn, btnText, action)
-        emptyLbl.Text = "ajusta los filtros o espera un hallazgo"
+        emptyLbl.Text = "adjust the filters or wait for a find"
         layoutHunt(true); return
     end
     diagCard.Visible = false
-    emptyLbl.Text = "sin objetivos"
+    emptyLbl.Text = "no targets"
     layoutHunt(true)
 end
 
@@ -1011,12 +1010,12 @@ local function renderList()
     end
 
     listLabel.Text = (#ST.candidates > 0)
-        and ("OBJETIVOS EN VIVO   ·   %d frescos de %d"):format(fresh, #ST.candidates)
-        or "OBJETIVOS EN VIVO"
+        and ("LIVE TARGETS   ·   %d fresh of %d"):format(fresh, #ST.candidates)
+        or "LIVE TARGETS"
     paintDiag()
 end
 
--- ═════════════════════════════════════════════════════════════════════ FILTROS
+-- ═════════════════════════════════════════════════════════════════════ FILTERS
 local function field(parent, lbl, x, y, w, value, onChange)
     caption(parent, lbl, x + 2, y, w)
     local box = mk("TextBox", {
@@ -1071,7 +1070,7 @@ local function toggleRow(parent, x, y, w, text, get, set)
     return b
 end
 
-caption(pgFilter, "RAREZAS ACEPTADAS", 2, 0, 220)
+caption(pgFilter, "ACCEPTED RARITIES", 2, 0, 220)
 local ladderNote = mk("TextLabel", {
     Position = UDim2.new(1,-214,0,0), Size = UDim2.new(0,212,0,13),
     BackgroundTransparency = 1, Font = Enum.Font.GothamMedium, TextSize = 9.5,
@@ -1108,7 +1107,7 @@ renderChips = function()
     end
     if ladderNote then
         ladderNote.Visible = (ST.ladderFrom ~= "hub")
-        ladderNote.Text = "lista local · el hub no responde"
+        ladderNote.Text = "local list · the hub is not responding"
     end
     for i, r in ipairs(ST.ladder) do
         local on, col = hasRarity(r.name), rc(r.name)
@@ -1149,12 +1148,12 @@ do
         b.MouseLeave:Connect(function() tw(b, EASE.fast, { BackgroundColor3 = C.card }) end)
         b.MouseButton1Click:Connect(function() fn(); save(); renderChips() end)
     end
-    quick("todas", 0, 72, function()
+    quick("all", 0, 72, function()
         CFG.RARITIES = {}
         for _, r in ipairs(ST.ladder) do table.insert(CFG.RARITIES, r.name) end
     end)
-    quick("ninguna", 78, 72, function() CFG.RARITIES = {} end)
-    quick("solo raras", 156, 88, function()
+    quick("none", 78, 72, function() CFG.RARITIES = {} end)
+    quick("rare only", 156, 88, function()
         CFG.RARITIES = {}
         for _, r in ipairs(ST.ladder) do
             if (tonumber(r.rank) or 0) >= 5 then table.insert(CFG.RARITIES, r.name) end
@@ -1162,18 +1161,18 @@ do
     end)
 end
 
-caption(pgFilter, "PESO Y FRESCURA", 2, 146, 220)
-field(pgFilter, "KG MINIMO", 0, 162, 124, CFG.MIN_KG, function(v) CFG.MIN_KG = tonumber(v) or 0 end)
-field(pgFilter, "KG MAXIMO · 0 = libre", 134, 162, 166, CFG.MAX_KG, function(v) CFG.MAX_KG = tonumber(v) or 0 end)
-field(pgFilter, "EDAD MAX (s)", 310, 162, 118, CFG.MAX_AGE, function(v)
+caption(pgFilter, "WEIGHT AND FRESHNESS", 2, 146, 220)
+field(pgFilter, "MIN KG", 0, 162, 124, CFG.MIN_KG, function(v) CFG.MIN_KG = tonumber(v) or 0 end)
+field(pgFilter, "MAX KG · 0 = no limit", 134, 162, 166, CFG.MAX_KG, function(v) CFG.MAX_KG = tonumber(v) or 0 end)
+field(pgFilter, "MAX AGE (s)", 310, 162, 118, CFG.MAX_AGE, function(v)
     CFG.MAX_AGE = math.max(0, tonumber(v) or 0)
 end)
 
-caption(pgFilter, "REGLAS", 2, 212, 220)
-toggleRow(pgFilter, 0, 228, 258, "ignorar lo que ya habia al encender",
+caption(pgFilter, "RULES", 2, 212, 220)
+toggleRow(pgFilter, 0, 228, 258, "ignore what was already there on start",
     function() return CFG.ONLY_NEW end,
     function(v) CFG.ONLY_NEW = v; if v then ST.cursor = ST.eggSeq end end)
-toggleRow(pgFilter, 266, 228, 258, "solo servers con hueco",
+toggleRow(pgFilter, 266, 228, 258, "only servers with a free slot",
     function() return CFG.HAS_SLOT end,
     function(v) CFG.HAS_SLOT = v end)
 
@@ -1182,21 +1181,21 @@ mk("TextLabel", {
     BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10.5,
     TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
     TextColor3 = C.mut, TextWrapped = true,
-    Text = "Los hallazgos mas viejos que EDAD MAX se siguen viendo en la lista, "
-        .. "marcados como «viejo», pero el salto automatico no va a por ellos. "
-        .. "Puedes unirte tu a mano con ▶.",
+    Text = "Finds older than MAX AGE stay visible in the list, tagged as "
+        .. "«stale», but auto join will not go for them. You can still join "
+        .. "them yourself with ▶.",
 }, pgFilter)
 
--- ══════════════════════════════════════════════════════════════════════ AJUSTES
-caption(pgConfig, "CONEXION", 2, 0, 220)
+-- ═════════════════════════════════════════════════════════════════════ SETTINGS
+caption(pgConfig, "CONNECTION", 2, 0, 220)
 field(pgConfig, "HUB URL", 0, 16, 528, CFG.HUB, function(v) CFG.HUB = (v:gsub("%s+",""):gsub("/+$","")) end)
 field(pgConfig, "API KEY", 0, 64, 326, CFG.KEY, function(v) CFG.KEY = (v:gsub("%s+","")) end)
-field(pgConfig, "NOMBRE DE ESTE CLIENTE", 336, 64, 192, CFG.CLIENT, function(v) CFG.CLIENT = v end)
+field(pgConfig, "NAME OF THIS CLIENT", 336, 64, 192, CFG.CLIENT, function(v) CFG.CLIENT = v end)
 
-caption(pgConfig, "RITMO", 2, 114, 220)
+caption(pgConfig, "PACING", 2, 114, 220)
 field(pgConfig, "POLL (s)", 0, 130, 100, CFG.POLL, function(v) CFG.POLL = math.max(2, tonumber(v) or 4) end)
 field(pgConfig, "COOLDOWN (s)", 110, 130, 116, CFG.COOLDOWN, function(v) CFG.COOLDOWN = math.max(3, tonumber(v) or 8) end)
-field(pgConfig, "ESPERA CLAIM (s)", 236, 130, 124, CFG.WAIT, function(v) CFG.WAIT = math.max(5, math.min(50, tonumber(v) or 20)) end)
+field(pgConfig, "CLAIM WAIT (s)", 236, 130, 124, CFG.WAIT, function(v) CFG.WAIT = math.max(5, math.min(50, tonumber(v) or 20)) end)
 field(pgConfig, "RAW · auto reload", 370, 130, 158, CFG.SCRIPT_URL, function(v) CFG.SCRIPT_URL = v end)
 
 do
@@ -1208,19 +1207,19 @@ do
     local tl = mk("TextLabel", {
         Size = UDim2.new(1,0,1,0), BackgroundTransparency = 1,
         Font = Enum.Font.GothamBold, TextSize = 11.5,
-        TextColor3 = C.white, Text = "PROBAR CONEXION",
+        TextColor3 = C.white, Text = "TEST CONNECTION",
     }, test)
     test.MouseButton1Click:Connect(function()
-        tl.Text = "PROBANDO…"
+        tl.Text = "TESTING…"
         task.spawn(function()
             local res, err = httpJson("GET", "/api/meta")
-            tl.Text = res and "CONECTADO ✓" or "SIN CONEXION"
+            tl.Text = res and "CONNECTED ✓" or "NO CONNECTION"
             if res then
-                pushLog(("hub ok · %d servers · %d huevos"):format(res.servers or 0, res.eggs or 0), C.ok)
+                pushLog(("hub ok · %d servers · %d eggs"):format(res.servers or 0, res.eggs or 0), C.ok)
             else
                 pushLog("hub error: " .. tostring(err), C.bad)
             end
-            task.delay(2, function() tl.Text = "PROBAR CONEXION" end)
+            task.delay(2, function() tl.Text = "TEST CONNECTION" end)
         end)
     end)
 
@@ -1229,7 +1228,7 @@ do
         BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10.5,
         TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
         TextColor3 = C.mut, TextWrapped = true,
-        Text = "Cada campo se guarda al salir de el. La misma API key que pusiste en el hub y en el reporter.",
+        Text = "Each field saves when you leave it. The same API key you set on the hub and the reporter.",
     }, pgConfig)
 end
 
@@ -1262,26 +1261,26 @@ do
     end
 end
 
--- ══════════════════════════════════════════════════════════════════════ estado
+-- ═══════════════════════════════════════════════════════════════════════ status
 local function paintStatus()
     statCards.servers.Text = tostring(ST.servers)
     statCards.matches.Text = tostring(#ST.candidates)
     statCards.hops.Text    = tostring(ST.hops)
     connDot.BackgroundColor3 = ST.connected and C.ok or C.bad
-    connLbl.Text = ST.connected and ("en vivo · " .. ST.eggsLive .. " huevos") or "sin conexion"
+    connLbl.Text = ST.connected and ("live · " .. ST.eggsLive .. " eggs") or "offline"
     connLbl.TextColor3 = ST.connected and C.txt2 or C.bad
 
     if not ST.connected then
-        subLbl.Text = "hub: " .. tostring(ST.lastErr or "sin respuesta")
+        subLbl.Text = "hub: " .. tostring(ST.lastErr or "no response")
         subLbl.TextColor3 = C.bad
     elseif ST.inServer then
-        subLbl.Text = "estas en el server de " .. tostring(ST.inServer.name or "?")
+        subLbl.Text = "you are on the server of " .. tostring(ST.inServer.name or "?")
         subLbl.TextColor3 = C.ok
     elseif ST.latency >= 0 then
-        subLbl.Text = "ultimo objetivo recibido en " .. ST.latency .. " ms"
+        subLbl.Text = "last target received in " .. ST.latency .. " ms"
         subLbl.TextColor3 = C.mut
     else
-        subLbl.Text = "conectado · esperando objetivo"
+        subLbl.Text = "connected · waiting for a target"
         subLbl.TextColor3 = C.mut
     end
 end
@@ -1291,7 +1290,7 @@ task.spawn(function()
     while true do
         local meta, err = httpJson("GET", "/api/meta")
         if meta then
-            if not ST.connected then pushLog("conectado al hub", C.ok) end
+            if not ST.connected then pushLog("connected to the hub", C.ok) end
             ST.connected, ST.lastErr = true, nil
             ST.servers  = meta.servers or 0
             ST.eggsLive = meta.eggs or 0
@@ -1309,7 +1308,7 @@ task.spawn(function()
             ST.connected, ST.lastErr = false, err
         end
 
-        -- La LISTA no filtra por edad: enseña tambien lo viejo, marcado.
+        -- The LIST does not filter by age: it also shows stale finds, tagged.
         local q = "?limit=30"
         if #CFG.RARITIES > 0 then q = q .. "&rarities=" .. HS:UrlEncode(table.concat(CFG.RARITIES, ",")) end
         if (tonumber(CFG.MIN_KG) or 0) > 0 then q = q .. "&minKg=" .. tostring(CFG.MIN_KG) end
@@ -1371,8 +1370,8 @@ UIS.InputBegan:Connect(function(input, gpe)
     if input.KeyCode == Enum.KeyCode.RightControl then togglePanel() end
 end)
 
--- Boton flotante: en movil no hay Right Control. Arrastrable para que no
--- estorbe, y con un toque abre el panel.
+-- Floating button: mobile has no Right Control. Draggable so it stays out of
+-- the way, and a tap opens the panel.
 do
     local fab = mk("TextButton", {
         AnchorPoint = Vector2.new(0, 0.5),
@@ -1400,10 +1399,10 @@ for _, step in ipairs({
     { "estado", paintStatus },
 }) do
     local ok, err = pcall(step[2])
-    if not ok then pushLog("fallo al pintar " .. step[1] .. ": " .. tostring(err), C.bad) end
+    if not ok then pushLog("failed to draw " .. step[1] .. ": " .. tostring(err), C.bad) end
 end
 
 if not httpreq then
-    pushLog("tu executor no expone request(): el AJ no puede hablar con el hub", C.bad)
+    pushLog("your executor does not expose request(): the AJ cannot reach the hub", C.bad)
 end
-pushLog("SAE AJ v5 listo · " .. (IS_TOUCH and "movil" or "PC"), C.acc2)
+pushLog("SAE AJ v5 ready · " .. (IS_TOUCH and "mobile" or "PC"), C.acc2)

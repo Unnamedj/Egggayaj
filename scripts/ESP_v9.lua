@@ -2,46 +2,46 @@
     SAE · EGG REPORTER v9
     F7 = labels    F8 = panel
 
-    Cambio de fondo frente al v8: el envio ya NO es un goteo continuo.
+    Core change from v8: sending is no longer a continuous trickle.
 
-      El v8 reescaneaba cada segundo y subia correcciones sobre la marcha. Eso
-      hacia que un huevo llegara al hub con una rareza y se corrigiera despues,
-      o peor, que se quedara con la equivocada.
+      v8 rescanned every second and pushed corrections as it went. An egg could
+      reach the hub with one rarity and be corrected later, or worse, keep the
+      wrong one.
 
-      El v9 hace cuatro cosas, en este orden y sin adelantarse:
+      v9 does four things, in this order and without getting ahead of itself:
 
-        1. ESPERA a que el server termine de cargar. No escanea para saberlo:
-           escucha el ChildAdded del contenedor de huevos. Mientras sigan
-           apareciendo modelos el server sigue cargando; cuando lleva QUIET
-           segundos sin novedades, ya esta. Asi se adapta solo a un server
-           rapido o a uno que tarda 30s, sin numeros magicos.
-        2. UN escaneo. Uno solo.
-        3. Manda ese resultado de una vez, con full=true.
-        4. Y solo entonces salta al siguiente server.
+        1. WAIT for the server to finish loading. It does not scan to find that
+           out: it listens to the egg container's ChildAdded. While models keep
+           arriving the server is still loading; once it has been quiet for
+           QUIET seconds, it is ready. That adapts on its own to a fast server
+           or one that takes 30s, with no magic numbers.
+        2. ONE scan. Just one.
+        3. Send that result in a single report, with full=true.
+        4. Only then hop to the next server.
 
-    Por que se equivocaba de rarezas (los tres fallos, ya corregidos):
+    Why it used to get rarities wrong (three faults, all fixed):
 
-      1. recordAssetId recorria pairs(rec) y se quedaba con el primer texto que
-         sonara a asset. pairs() no tiene orden estable, asi que el mismo huevo
-         podia resolverse como dos assets distintos en dos pasadas.
-      2. Los records se indexaban tambien por campos como Slot o Key, que los
-         huevos de zona COMPARTEN (Slot_002 se repite en cada server). Un huevo
-         acababa cogiendo el record de otro.
-      3. Si no habia record, adivinaba la rareza por el color del modelo.
+      1. recordAssetId walked pairs(rec) and took the first string that looked
+         like an asset. pairs() has no stable order, so the same egg could
+         resolve to two different assets on two passes.
+      2. Records were also indexed by fields like Slot or Key, which zone eggs
+         SHARE (Slot_002 repeats on every server). One egg ended up picking up
+         another's record.
+      3. With no record, it guessed the rarity from the model colour.
 
-      Ahora la busqueda sigue siendo amplia, pero DETERMINISTA: campos con
-      prioridad en orden fijo, luego el nombre visible, y por ultimo el resto
-      de campos solo si todos apuntan al mismo asset. Una colision se juzga por
-      si dos records DISCREPAN, no por si son la misma tabla: el juego devuelve
-      el mismo huevo en dos lecturas distintas y compararlo por identidad
-      anulaba la clave y dejaba el reporte a cero.
+      The lookup is broad again, but DETERMINISTIC: priority fields in a fixed
+      order, then the display name, and finally the remaining fields only if
+      they all point at the same asset. A collision is judged on whether two
+      records DISAGREE, not on whether they are the same table: the game returns
+      the same egg from two different reads, and comparing by identity nulled
+      the key and left the report at zero.
 
-      Lo que no se resuelve con certeza no se envia. Y si no se resuelve NADA
-      habiendo huevos delante, no se manda un snapshot vacio: eso le diria al
-      hub que el server esta limpio y borraria un reporte bueno anterior.
+      Anything not resolved with certainty is not sent. And if NOTHING resolves
+      while eggs are sitting right there, no empty snapshot goes out: that would
+      tell the hub the server is clean and wipe a good earlier report.
 
-    Los labels en pantalla siguen refrescandose en vivo: eso es cosmetico y no
-    toca la red.
+    On-screen labels still refresh live: that is cosmetic and never touches the
+    network.
 ]]
 
 local Players           = game:GetService("Players")
@@ -63,13 +63,13 @@ local CFG = {
     CONFIG_FILE    = "jf_reporter_v9.json",
     VISITED_FILE   = "jf_esp_visited.json",
 
-    -- Esperar a que el server cargue, y ENTONCES una sola pasada.
-    -- No hace falta escanear para saber si ha terminado de cargar: el
-    -- contenedor de huevos avisa cada vez que le añaden un modelo, asi que
-    -- basta con esperar a que deje de avisar.
-    QUIET          = 2.5,   -- s sin modelos nuevos = el server ya cargo
-    READY_TIMEOUT  = 60,    -- s como mucho esperando esa señal
-    HEARTBEAT      = 120,   -- s entre latidos que mantienen vivo el reporte
+    -- Wait for the server to load, and THEN a single pass.
+    -- No scanning is needed to know it has finished: the egg container fires
+    -- an event whenever a model is added, so waiting for it to go quiet is
+    -- enough.
+    QUIET          = 2.5,   -- s with no new models = the server has loaded
+    READY_TIMEOUT  = 60,    -- s at most waiting for that signal
+    HEARTBEAT      = 120,   -- s between heartbeats that keep the report alive
 
     -- auto hop
     HOP_AFTER_SEND = true,
@@ -80,8 +80,8 @@ local CFG = {
     HOP_STUCK      = 20,
 }
 
--- Los de base se leen para poder contarlos y etiquetarlos en pantalla, pero
--- solo este contenedor puede acabar en la red.
+-- Base eggs are read so they can be counted and labelled on screen, but only
+-- this container can ever reach the network.
 local CONTAINERS = { "AreaEggSlotsClient", "PlacedEggRenders", "Eggs", "New Pets" }
 local ZONE_OK    = { AreaEggSlotsClient = true }
 
@@ -96,7 +96,7 @@ local function new(class, props, parent)
 end
 
 ----------------------------------------------------------------------
--- MÓDULOS DEL JUEGO
+-- GAME MODULES
 ----------------------------------------------------------------------
 local function nav(root, path)
     local node = root
@@ -108,7 +108,7 @@ local function req(path)
     local m = nav(ReplicatedStorage, path)
     if not m then return nil, "no existe" end
     local ok, v = pcall(require, m)
-    if not ok then return nil, "require fallo" end
+    if not ok then return nil, "require failed" end
     return v
 end
 
@@ -121,10 +121,10 @@ diag("EggState:%s EggRecords:%s Assets:%s",
     Assets and "OK" or tostring(e3))
 
 ----------------------------------------------------------------------
--- ÍNDICE DE ASSETS
+-- ASSET INDEX
 ----------------------------------------------------------------------
 local assetIndex, rarityList = {}, {}
-local byEggName = {}   -- nombre -> info, o false si dos assets lo comparten
+local byEggName = {}   -- name -> info, or false when two assets share it
 
 do
     if Assets and type(Assets.ByRarity) == "table" then
@@ -151,8 +151,8 @@ do
         end
     end
 
-    -- Indice por nombre de huevo. Si dos assets distintos comparten nombre se
-    -- marca como ambiguo y nunca se usa: preferimos no resolver a resolver mal.
+    -- Index by egg name. If two different assets share a name it is marked
+    -- ambiguous and never used: better unresolved than wrongly resolved.
     for _, info in pairs(assetIndex) do
         local k = tostring(info.eggName):lower()
         if byEggName[k] == nil then
@@ -172,11 +172,11 @@ do
     table.sort(rarityList, function(a, b) return a.num < b.num end)
 
     local n = 0; for _ in pairs(assetIndex) do n = n + 1 end
-    diag("assets:%d rarezas:%d", n, #rarityList)
+    diag("assets:%d rarities:%d", n, #rarityList)
 end
 
 ----------------------------------------------------------------------
--- ZONAS DEL MAPA
+-- MAP ZONES
 ----------------------------------------------------------------------
 local AREAS = {}
 local function indexAreas()
@@ -207,15 +207,15 @@ local function areaOf(model, pos)
 end
 
 ----------------------------------------------------------------------
--- RESOLUCIÓN DE RECORDS
+-- RECORD RESOLUTION
 ----------------------------------------------------------------------
--- Estos campos tienen PRIORIDAD para identificar el asset, en este orden.
--- Si ninguno acierta se mira el resto del record, pero de forma ordenada:
--- el problema del v8 no era mirar campos de mas, era que pairs() decidia el
--- ganador y pairs() no tiene orden garantizado.
+-- These fields have PRIORITY for identifying the asset, in this order.
+-- If none hit, the rest of the record is examined, but in a fixed order: v8's
+-- problem was not looking at extra fields, it was that pairs() picked the
+-- winner and pairs() has no guaranteed order.
 local ASSET_KEYS = { "AssetId", "Asset", "AssetName", "Species", "EggType", "Type", "Id", "Name" }
 
--- Claves con las que se puede localizar un record desde el nombre del modelo.
+-- Keys a record can be located by, starting from the model name.
 local ID_FIELDS = { "Uid", "UID", "uid", "Id", "ID", "Key", "SlotKey", "ModelName", "Slot" }
 
 local function displayNameOf(rec)
@@ -226,12 +226,12 @@ local function displayNameOf(rec)
     return nil
 end
 
--- Determinista pase lo que pase:
---   1. campos con prioridad, en orden fijo
---   2. nombre visible, si es inequivoco
---   3. cualquier otro campo de texto que sea un asset conocido, pero SOLO si
---      todos apuntan al mismo. Si discrepan, no se resuelve: preferimos
---      omitir el huevo a mandarlo con la rareza de otro.
+-- Deterministic whatever happens:
+--   1. priority fields, in a fixed order
+--   2. display name, when unambiguous
+--   3. any other text field naming a known asset, but ONLY if they all point
+--      at the same one. If they disagree it stays unresolved: better to omit
+--      the egg than send it with someone else's rarity.
 local function recordAssetId(rec)
     if type(rec) ~= "table" then return nil end
 
@@ -256,8 +256,8 @@ local function recordAssetId(rec)
     return only
 end
 
--- Sirve tambien con assetIndex vacio (si Data.Assets no cargo): asi el
--- diagnostico puede enseñar que records hay aunque no se puedan resolver.
+-- Works even with an empty assetIndex (if Data.Assets failed to load): that
+-- way diagnostics can show what records exist even when nothing resolves.
 local function looksLikeRecord(t)
     if type(t) ~= "table" then return false end
     for _, k in ipairs(ASSET_KEYS) do
@@ -270,17 +270,17 @@ local function looksLikeRecord(t)
     return false
 end
 
--- Dos lecturas distintas (ReadFieldEggs y ReadOwnerEggs) devuelven el MISMO
--- huevo en tablas distintas. Comparar por identidad marcaba eso como colision
--- y anulaba la clave: con eso no se resolvia ni un huevo. Lo que importa es si
--- discrepan en el asset, no si son la misma tabla.
+-- Two different reads (ReadFieldEggs and ReadOwnerEggs) return the SAME egg in
+-- different tables. Comparing by identity marked that as a collision and nulled
+-- the key, so not one egg resolved. What matters is whether they disagree on
+-- the asset, not whether they are the same table.
 local function put(out, key, node)
     if type(key) ~= "string" or key == "" then return end
     local cur = out[key]
     if cur == nil or cur == node then out[key] = node; return end
     if cur == false then return end
     local a, b = recordAssetId(cur), recordAssetId(node)
-    if a and b and a == b then return end   -- el mismo huevo visto dos veces
+    if a and b and a == b then return end   -- the same egg seen twice
     out[key] = false                        -- de verdad se contradicen
 end
 
@@ -333,14 +333,14 @@ end
 ----------------------------------------------------------------------
 local function httpPost(url, body, headers)
     local fn = (syn and syn.request) or (http and http.request) or http_request or request
-    if not fn then return false, "executor sin request()" end
+    if not fn then return false, "executor has no request()" end
     local h = { ["Content-Type"] = "application/json" }
     if headers then for k, v in pairs(headers) do h[k] = v end end
     local ok, res = pcall(fn, { Url = url, Method = "POST", Headers = h, Body = body })
     if not ok then return false, tostring(res) end
     local code = res and (res.StatusCode or res.Status or res.status_code) or 0
     if code == 401 then return false, "API key incorrecta" end
-    if code == 404 then return false, "404 · revisa la URL del hub" end
+    if code == 404 then return false, "404 · check the hub URL" end
     if code >= 200 and code < 300 then return true, res.Body end
     return false, "HTTP " .. tostring(code)
 end
@@ -357,14 +357,14 @@ local function comma(n)
 end
 
 ----------------------------------------------------------------------
--- ESTADO
+-- STATE
 ----------------------------------------------------------------------
 local WH  = { url="", enabled=false, rarities={}, count=0, status="inactivo", queue={} }
 local HUB = { url="", key="", enabled=true, count=0, status="inactivo", lastMs=0 }
 local HOP = { enabled=false, busy=false, busySince=0, hops=0, visited={}, status="inactivo" }
 
--- Se normaliza en cada envio, no solo al salir del campo: una barra final
--- convertia /api/report en //api/report, que el hub servia como fichero (404).
+-- Normalised on every send, not just on focus lost: a trailing slash turned
+-- /api/report into //api/report, which the hub served as a file (404).
 local function hubBase()
     local u = tostring(HUB.url or ""):gsub("%s+", "")
     u = u:gsub("/+$", ""):gsub("/api$", "")
@@ -373,8 +373,8 @@ local function hubBase()
 end
 
 local SCAN = {
-    -- espera | escaneando | enviando | listo | error
-    phase   = "espera",
+    -- waiting | scanning | sending | done | error
+    phase   = "waiting",
     failStreak = 0,
     passes  = 0,
     stable  = 0,
@@ -435,7 +435,7 @@ end
 loadVisited()
 
 ----------------------------------------------------------------------
--- ESCANEO
+-- SCAN
 ----------------------------------------------------------------------
 local function anchorOf(model)
     local hb = model:FindFirstChild("Hitbox")
@@ -452,14 +452,14 @@ local function uidFromModelName(n)
     return uid or n
 end
 
--- Una pasada completa. Devuelve solo lo que se resolvio CON CERTEZA, mas los
--- contadores de lo que se dejo fuera y por que.
+-- One complete pass. Returns only what resolved WITH CERTAINTY, plus counters
+-- for what was left out and why.
 local function scanOnce()
     local recs, nrec = collectRecords()
     local eggs, skipped, base = {}, 0, 0
 
-    -- Todo lo que hace falta para entender un escaneo que sale mal, sin tener
-    -- que adivinar desde fuera.
+    -- Everything needed to understand a scan that goes wrong, without having
+    -- to guess from the outside.
     local D = { zone = 0, why = {}, sampleKeys = nil, sampleName = nil, misses = {} }
     local function fail(reason, modelName)
         skipped = skipped + 1
@@ -486,8 +486,8 @@ local function scanOnce()
                     end
                     if not rec then rec = fetchField(model.Name) or fetchField(uid) end
 
-                    -- Guarda una muestra de los campos de un record real: es lo
-                    -- unico que dice como se llaman de verdad en este juego.
+                    -- Keep a sample of a real record's fields: it is the only
+                    -- thing that says what they are actually called in this game.
                     if rec and not D.sampleKeys then
                         local ks = {}
                         for k, v in pairs(rec) do
@@ -495,7 +495,7 @@ local function scanOnce()
                         end
                         table.sort(ks)
                         D.sampleKeys = table.concat(ks, " ")
-                        D.sampleName = displayNameOf(rec) or "(sin DisplayName)"
+                        D.sampleName = displayNameOf(rec) or "(no DisplayName)"
                     end
 
                     local aid = rec and recordAssetId(rec) or nil
@@ -515,11 +515,11 @@ local function scanOnce()
                             model  = model,
                         }
                     elseif not anchor then
-                        fail("sin parte fisica", model.Name)
+                        fail("no physical part", model.Name)
                     elseif not rec then
-                        fail(collided and "clave duplicada" or "sin record", model.Name)
+                        fail(collided and "duplicate key" or "no record", model.Name)
                     else
-                        fail("record sin asset reconocible", model.Name)
+                        fail("record with no recognisable asset", model.Name)
                     end
                 end
             end
@@ -531,26 +531,26 @@ local function scanOnce()
     return eggs, skipped, base, nrec, D
 end
 
--- Espera a que el server este cargado de verdad. Esto NO escanea: mira si el
--- cliente cargo, si hay personaje, si existe el contenedor de zona, y sobre
--- todo escucha su ChildAdded. Mientras sigan apareciendo modelos, el server
--- sigue cargando; cuando lleva QUIET segundos sin novedades, ya esta.
--- Devuelve el contenedor, o nil y el motivo.
+-- Waits until the server is genuinely loaded. This does NOT scan: it checks
+-- whether the client loaded, whether there is a character, whether the zone
+-- container exists, and above all listens to its ChildAdded. While models keep
+-- appearing the server is still loading; once QUIET seconds pass with nothing
+-- new, it is ready. Returns the container, or nil and the reason.
 local function waitForServer()
     local t0 = os.clock()
     local function timeLeft() return CFG.READY_TIMEOUT - (os.clock() - t0) end
 
-    SCAN.phase = "espera"
+    SCAN.phase = "waiting"
 
-    SCAN.detail = "esperando a que cargue el cliente"
+    SCAN.detail = "waiting for the client to load"
     if not game:IsLoaded() then pcall(function() game.Loaded:Wait() end) end
 
-    SCAN.detail = "esperando al personaje"
+    SCAN.detail = "waiting for the character"
     if not LocalPlayer.Character then
         pcall(function() LocalPlayer.CharacterAdded:Wait() end)
     end
 
-    SCAN.detail = "esperando la zona de huevos"
+    SCAN.detail = "waiting for the egg zone"
     local zone = Workspace:FindFirstChild(CFG.ZONE_CONTAINER)
     if not zone then
         local ok, z = pcall(function()
@@ -558,7 +558,7 @@ local function waitForServer()
         end)
         zone = ok and z or nil
     end
-    if not zone then return nil, "no aparecio " .. CFG.ZONE_CONTAINER end
+    if not zone then return nil, CFG.ZONE_CONTAINER .. " never appeared" end
 
     local lastAdd = os.clock()
     local conn = zone.ChildAdded:Connect(function() lastAdd = os.clock() end)
@@ -567,29 +567,29 @@ local function waitForServer()
         task.wait(0.3)
         local quiet  = os.clock() - lastAdd
         local models = #zone:GetChildren()
-        SCAN.detail = ("%d modelos en la zona · %.1fs sin novedades"):format(models, quiet)
+        SCAN.detail = ("%d models in the zone · %.1fs with nothing new"):format(models, quiet)
 
         if models > 0 and quiet >= CFG.QUIET then
-            -- collectRecords es caro, asi que solo se comprueba cuando el
-            -- contenedor ya esta quieto. Los records del juego pueden llegar
-            -- despues que los modelos.
+            -- collectRecords is expensive, so it is only checked once the
+            -- container has gone quiet. The game's records can arrive after
+            -- the models do.
             local _, nrec = collectRecords()
             if nrec > 0 then
                 conn:Disconnect()
                 return zone
             end
-            SCAN.detail = ("%d modelos, esperando los datos del juego"):format(models)
+            SCAN.detail = ("%d models, waiting for the game data"):format(models)
         end
 
         if timeLeft() <= 0 then
             conn:Disconnect()
-            return zone, "se agoto la espera"
+            return zone, "wait timed out"
         end
     end
 end
 
 ----------------------------------------------------------------------
--- ENVÍO (una sola vez)
+-- SEND (once only)
 ----------------------------------------------------------------------
 local function eggPayload(e)
     local info = e.info
@@ -616,24 +616,24 @@ end
 local function buildEmbed(e)
     local pos = e.anchor and e.anchor.Position or Vector3.new()
     local info = e.info
-    local jobId = game.JobId ~= "" and game.JobId or "servidor privado / studio"
+    local jobId = game.JobId ~= "" and game.JobId or "private server / studio"
     return HttpService:JSONEncode({
         embeds = {{
             title       = "🥚  " .. info.eggName,
             color       = colorInt(e.color),
             description = string.format("**%s**  ·  %s", info.rarity, info.odds or "?"),
             fields = {
-                { name = "Peso",      value = "`" .. comma(e.kg) .. " kg`",            inline = true },
-                { name = "Mascota",   value = info.petName or "?",                     inline = true },
-                { name = "Zona",      value = (e.area ~= "" and e.area) or "Zona",     inline = true },
-                { name = "Ganancia",  value = "`" .. comma(info.earn or 0) .. "/s`",   inline = true },
-                { name = "Eclosión",  value = "`" .. tostring(info.growth or 0) .. "s`", inline = true },
-                { name = "Posición",  value = string.format("`%d, %d, %d`", pos.X, pos.Y, pos.Z), inline = true },
+                { name = "Weight",    value = "`" .. comma(e.kg) .. " kg`",            inline = true },
+                { name = "Pet",       value = info.petName or "?",                     inline = true },
+                { name = "Zone",      value = (e.area ~= "" and e.area) or "Zone",     inline = true },
+                { name = "Earnings",  value = "`" .. comma(info.earn or 0) .. "/s`",   inline = true },
+                { name = "Hatch",     value = "`" .. tostring(info.growth or 0) .. "s`", inline = true },
+                { name = "Position",  value = string.format("`%d, %d, %d`", pos.X, pos.Y, pos.Z), inline = true },
                 { name = "Job ID",    value = "```" .. jobId .. "```",                 inline = false },
-                { name = "Unirse",    value = string.format("```js\nRoblox.GameLauncher.joinGameInstance(%d, \"%s\")\n```", game.PlaceId, jobId), inline = false },
-                { name = "Jugadores", value = string.format("`%d / %d`", #Players:GetPlayers(), Players.MaxPlayers), inline = true },
+                { name = "Join",      value = string.format("```js\nRoblox.GameLauncher.joinGameInstance(%d, \"%s\")\n```", game.PlaceId, jobId), inline = false },
+                { name = "Players",   value = string.format("`%d / %d`", #Players:GetPlayers(), Players.MaxPlayers), inline = true },
             },
-            footer    = { text = "SAE By joszz  ·  zona" },
+            footer    = { text = "SAE By joszz  ·  zone" },
             timestamp = DateTime.now():ToIsoDate(),
         }},
     })
@@ -646,7 +646,7 @@ task.spawn(function()
             local ok, err = httpPost(WH.url, body)
             if ok then
                 WH.count = WH.count + 1
-                WH.status = "enviado " .. os.date("%H:%M:%S")
+                WH.status = "sent " .. os.date("%H:%M:%S")
             else
                 WH.status = "error: " .. tostring(err)
             end
@@ -657,16 +657,16 @@ task.spawn(function()
     end
 end)
 
--- Un reporte, con full=true: el hub se queda exactamente con esto para este
--- server y tira cualquier cosa anterior.
--- Lo ultimo que se mando bien, ya convertido a payload plano: el latido lo
--- reenvia sin volver a tocar los modelos del juego.
+-- One report, with full=true: the hub keeps exactly this for this server and
+-- discards anything earlier.
+-- The last thing sent successfully, already flattened into a payload: the
+-- heartbeat resends it without touching the game's models again.
 local LAST = { payload = nil, jobId = nil, at = 0 }
 
 local function sendReport(eggs)
     if not HUB.enabled or HUB.url == "" then
-        HUB.status = "hub apagado o sin URL"
-        return false, "sin hub"
+        HUB.status = "hub off or no URL"
+        return false, "no hub"
     end
     local payload = {}
     for _, e in ipairs(eggs) do payload[#payload+1] = eggPayload(e) end
@@ -686,7 +686,7 @@ local function sendReport(eggs)
     HUB.lastMs = math.floor((os.clock() - t0) * 1000)
     if ok then
         HUB.count = HUB.count + #payload
-        HUB.status = string.format("%d huevos · %dms · %s", #payload, HUB.lastMs, os.date("%H:%M:%S"))
+        HUB.status = string.format("%d eggs · %dms · %s", #payload, HUB.lastMs, os.date("%H:%M:%S"))
         LAST.payload = payload
         LAST.jobId = game.JobId
         LAST.at = os.time()
@@ -696,11 +696,11 @@ local function sendReport(eggs)
     return ok, err
 end
 
--- Latido. El hub olvida un server que lleva SERVER_TTL_SEC sin dar señales
--- (8 min por defecto), asi que un reporte de un solo disparo se evaporaba y el
--- hallazgo desaparecia aunque el huevo siguiera ahi. Reenvia EXACTAMENTE lo
--- mismo: los uid ya son conocidos, asi que no crea huevos nuevos, no cambia
--- ninguna rareza y no dispara eventos en el AJ. Solo dice "sigo aqui".
+-- Heartbeat. The hub forgets a server after SERVER_TTL_SEC without a signal
+-- (8 min by default), so a one-shot report evaporated and the find vanished
+-- even with the egg still there. It resends EXACTLY the same thing: the uids
+-- are already known, so it creates no eggs, changes no rarity and fires no
+-- events in the AJ. It just says "still here".
 task.spawn(function()
     while true do
         task.wait(CFG.HEARTBEAT)
@@ -716,7 +716,7 @@ task.spawn(function()
             })
             local ok = httpPost(hubBase() .. "/api/report", body, { ["x-eag-key"] = HUB.key })
             if ok then
-                HUB.status = string.format("%d huevos · latido %s",
+                HUB.status = string.format("%d eggs · heartbeat %s",
                     #LAST.payload, os.date("%H:%M:%S"))
             end
         end
@@ -772,17 +772,17 @@ local function findNextServer()
     return best
 end
 
-local runScan  -- declarado antes para que doHop pueda reintentar el ciclo
+local runScan  -- declared early so doHop can retry the cycle
 
 local function doHop()
     if HOP.busy then return end
     HOP.busy = true
     HOP.busySince = os.clock()
-    HOP.status = "buscando server vacio…"
+    HOP.status = "looking for an empty server…"
 
     local target = findNextServer()
     if not target then
-        HOP.status = "sin servers nuevos · reintento en 10s"
+        HOP.status = "no new servers · retrying in 10s"
         HOP.busy = false
         task.delay(10, function() if HOP.enabled then doHop() end end)
         return
@@ -792,20 +792,20 @@ local function doHop()
     if game.JobId ~= "" then HOP.visited[game.JobId] = os.time() end
     saveVisited()
     HOP.hops = HOP.hops + 1
-    HOP.status = ("saltando -> %s · %d jug"):format(target.id:sub(1,8), target.playing or 0)
+    HOP.status = ("hopping -> %s · %d players"):format(target.id:sub(1,8), target.playing or 0)
 
     local ok, err = pcall(function()
         TeleportService:TeleportToPlaceInstance(game.PlaceId, target.id, LocalPlayer)
     end)
     if not ok then
-        HOP.status = "fallo el salto: " .. tostring(err)
+        HOP.status = "hop failed: " .. tostring(err)
         HOP.busy = false
         task.delay(CFG.HOP_RETRY, function() if HOP.enabled then doHop() end end)
     end
 end
 
 TeleportService.TeleportInitFailed:Connect(function(_, _, msg)
-    HOP.status = "teleport rechazado: " .. tostring(msg)
+    HOP.status = "teleport rejected: " .. tostring(msg)
     HOP.busy = false
     task.delay(CFG.HOP_RETRY, function() if HOP.enabled then doHop() end end)
 end)
@@ -814,7 +814,7 @@ task.spawn(function()
     while true do
         task.wait(2)
         if HOP.enabled and HOP.busy and (os.clock() - HOP.busySince) > CFG.HOP_STUCK then
-            HOP.status = "el salto no llego a ocurrir"
+            HOP.status = "the hop never happened"
             HOP.busy = false
             doHop()
         end
@@ -822,7 +822,7 @@ task.spawn(function()
 end)
 
 ----------------------------------------------------------------------
--- EL CICLO: escanear hasta que se estabilice -> mandar una vez -> saltar
+-- THE CYCLE: wait -> one scan -> send once -> hop
 ----------------------------------------------------------------------
 local scanning = false
 
@@ -831,10 +831,10 @@ runScan = function(manual)
     scanning = true
 
     task.spawn(function()
-        SCAN.phase, SCAN.passes = "espera", 0
+        SCAN.phase, SCAN.passes = "waiting", 0
 
-        -- 1. Esperar. Aqui no se escanea nada: solo se espera la señal de que
-        --    el server termino de cargar.
+        -- 1. Wait. Nothing is scanned here: it only waits for the signal that
+        --    the server has finished loading.
         local zoneFolder, warn = waitForServer()
         if not zoneFolder then
             SCAN.phase = "error"
@@ -844,9 +844,9 @@ runScan = function(manual)
             return
         end
 
-        -- 2. Un escaneo. Uno solo.
-        SCAN.phase = "escaneando"
-        SCAN.detail = "escaneo unico"
+        -- 2. One scan. Just one.
+        SCAN.phase = "scanning"
+        SCAN.detail = "single scan"
         local eggs, skipped, base, nrec, D = scanOnce()
         SCAN.passes = 1
         SCAN.found, SCAN.skipped, SCAN.base, SCAN.diag = #eggs, skipped, base, D
@@ -854,47 +854,47 @@ runScan = function(manual)
 
         local zone = (D and D.zone) or 0
 
-        -- Habia modelos de zona delante y no se resolvio ninguno: es un fallo
-        -- de resolucion, no un server vacio. Mandar full=true con lista vacia
-        -- le diria al hub "aqui no hay nada" y borraria un reporte bueno.
+        -- Zone models were right there and none resolved: that is a resolution
+        -- fault, not an empty server. Sending full=true with an empty list would
+        -- tell the hub "nothing here" and wipe a good report.
         if #eggs == 0 and zone > 0 then
             SCAN.failStreak = (SCAN.failStreak or 0) + 1
             SCAN.phase = "error"
             SCAN.doneAt = os.time()
             SCAN.sent = 0
-            SCAN.detail = ("%d modelos de zona y 0 resueltos · no se manda nada · mira DIAGNOSTICO")
+            SCAN.detail = ("%d zone models and 0 resolved · nothing sent · see DIAGNOSTICS")
                 :format(zone)
             scanning = false
 
-            -- Si falla en varios servers seguidos el problema no es el server:
-            -- dejar de saltar y quedarse quieto para que se pueda mirar.
+            -- Failing on several servers in a row means the fault is not the
+            -- server: stop hopping and sit still so it can be looked at.
             if SCAN.failStreak >= 3 then
-                HOP.status = "parado: " .. SCAN.failStreak .. " servers seguidos sin resolver nada"
+                HOP.status = "stopped: " .. SCAN.failStreak .. " servers in a row resolved nothing"
                 return
             end
             if HOP.enabled and not manual then task.wait(2); doHop() end
             return
         end
 
-        -- 3. Enviar.
+        -- 3. Send.
         SCAN.failStreak = 0
-        SCAN.phase = "enviando"
-        SCAN.detail = ("mandando %d huevos"):format(#eggs)
+        SCAN.phase = "sending"
+        SCAN.detail = ("sending %d eggs"):format(#eggs)
 
         sendWebhook(eggs)
         local ok, err = sendReport(eggs)
 
         SCAN.sent = ok and #eggs or 0
         SCAN.doneAt = os.time()
-        SCAN.phase = ok and "listo" or "error"
+        SCAN.phase = ok and "done" or "error"
         SCAN.detail = ok
-            and ("%d enviados · %d sin record · %d de base ignorados")
+            and ("%d sent · %d without record · %d base ignored")
                 :format(#eggs, skipped, base)
-            or ("no se pudo enviar: " .. tostring(err))
+            or ("could not send: " .. tostring(err))
 
         scanning = false
 
-        -- 4. Y solo ahora, el salto. Nunca antes, y solo si el reporte llego.
+        -- 4. And only now, the hop. Never earlier, and only if the report landed.
         if ok and HOP.enabled and not manual then
             task.wait(1)
             doHop()
@@ -903,7 +903,7 @@ runScan = function(manual)
 end
 
 ----------------------------------------------------------------------
--- LABELS (solo visual, se refrescan en vivo)
+-- LABELS (visual only, refreshed live)
 ----------------------------------------------------------------------
 local labels, showLabels, liveList = {}, true, {}
 
@@ -1023,7 +1023,7 @@ do
         Position = UDim2.new(0,41,0,21), Size = UDim2.new(0,240,0,12),
         BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10,
         TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = C.mut,
-        Text = "un escaneo · un reporte · F7 labels · F8 panel",
+        Text = "one scan · one report · F7 labels · F8 panel",
     }, head)
 
     local close = new("TextButton", {
@@ -1094,7 +1094,7 @@ do
     phaseLbl = new("TextLabel", {
         Position = UDim2.new(0,30,0,9), Size = UDim2.new(1,-140,0,18),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 13,
-        TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = C.txt, Text = "esperando",
+        TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = C.txt, Text = "waiting",
     }, statusCard)
 
     detailLbl = new("TextLabel", {
@@ -1112,7 +1112,7 @@ do
     rescanLbl = new("TextLabel", {
         Size = UDim2.new(1,0,1,0), BackgroundTransparency = 1,
         Font = Enum.Font.GothamBold, TextSize = 10.5,
-        TextColor3 = Color3.new(1,1,1), Text = "RE-ESCANEAR",
+        TextColor3 = Color3.new(1,1,1), Text = "RESCAN",
     }, rescan)
     rescan.MouseButton1Click:Connect(function() runScan(true) end)
 
@@ -1120,7 +1120,7 @@ do
         Position = UDim2.new(0,2,0,70), Size = UDim2.new(1,-4,0,12),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 9,
         TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = C.mut,
-        Text = "LO QUE SE ENVIO",
+        Text = "WHAT WAS SENT",
     }, pResult)
 
     local listScroll = new("ScrollingFrame", {
@@ -1162,9 +1162,9 @@ do
         return b
     end
 
-    local hubUrlBox = fieldOn(pHub, "URL DEL HUB", 0, "https://tu-app.up.railway.app", HUB.url,
+    local hubUrlBox = fieldOn(pHub, "HUB URL", 0, "https://tu-app.up.railway.app", HUB.url,
         function(v) HUB.url = (v:gsub("%s+",""):gsub("/+$","")) end)
-    local hubKeyBox = fieldOn(pHub, "API KEY", 50, "la misma API_KEY del hub", HUB.key,
+    local hubKeyBox = fieldOn(pHub, "API KEY", 50, "the same API_KEY as the hub", HUB.key,
         function(v) HUB.key = (v:gsub("%s+","")) end)
 
     local function toggleOn(parent2, y, get, set, text)
@@ -1190,47 +1190,47 @@ do
     end
 
     toggleOn(pHub, 100, function() return HUB.enabled end,
-        function(v) HUB.enabled = v end, "reportar al hub")
+        function(v) HUB.enabled = v end, "report to the hub")
 
     local _, paintHopBtn = toggleOn(pHub, 134, function() return HOP.enabled end,
         function(v)
             HOP.enabled = v
             HOP.status = v and "activo" or "inactivo"
-            -- Si lo enciendes con el escaneo ya terminado, salta ya.
-            if v and SCAN.phase == "listo" and not HOP.busy then task.delay(0.5, doHop) end
+            -- Turned on with the scan already finished: hop right away.
+            if v and SCAN.phase == "done" and not HOP.busy then task.delay(0.5, doHop) end
         end,
-        "auto hop: al terminar el reporte, saltar al siguiente server")
+        "auto hop: once the report is done, move to the next server")
     hopBtnLbl = paintHopBtn
 
     local testBtn = new("TextButton", {
         Position = UDim2.new(0,0,0,172), Size = UDim2.new(0,140,0,28),
         BackgroundColor3 = C.card2, BorderSizePixel = 0, Font = Enum.Font.GothamBold,
-        TextSize = 10.5, TextColor3 = C.txt2, Text = "PROBAR CONEXION", AutoButtonColor = false,
+        TextSize = 10.5, TextColor3 = C.txt2, Text = "TEST CONNECTION", AutoButtonColor = false,
     }, pHub)
     corner(testBtn, 7); stroke(testBtn, C.line, 0.4)
     testBtn.MouseButton1Click:Connect(function()
         HUB.url = (hubUrlBox.Text:gsub("%s+",""):gsub("/+$",""))
         HUB.key = (hubKeyBox.Text:gsub("%s+",""))
         saveConfig()
-        testBtn.Text = "PROBANDO…"
+        testBtn.Text = "TESTING…"
         task.spawn(function()
             local ok, err = httpPost(hubBase() .. "/api/report",
                 HttpService:JSONEncode({ jobId = "test-" .. tostring(math.random(10000,99999)), eggs = {} }),
                 { ["x-eag-key"] = HUB.key })
-            testBtn.Text = ok and "CONECTADO ✓" or "FALLO"
-            HUB.status = ok and "conexion ok" or ("error: " .. tostring(err))
-            task.delay(2, function() testBtn.Text = "PROBAR CONEXION" end)
+            testBtn.Text = ok and "CONNECTED ✓" or "FAILED"
+            HUB.status = ok and "connection ok" or ("error: " .. tostring(err))
+            task.delay(2, function() testBtn.Text = "TEST CONNECTION" end)
         end)
     end)
 
     local forgetBtn = new("TextButton", {
         Position = UDim2.new(0,148,0,172), Size = UDim2.new(0,150,0,28),
         BackgroundColor3 = C.card2, BorderSizePixel = 0, Font = Enum.Font.GothamBold,
-        TextSize = 10.5, TextColor3 = C.txt2, Text = "OLVIDAR VISITADOS", AutoButtonColor = false,
+        TextSize = 10.5, TextColor3 = C.txt2, Text = "FORGET VISITED", AutoButtonColor = false,
     }, pHub)
     corner(forgetBtn, 7); stroke(forgetBtn, C.line, 0.4)
     forgetBtn.MouseButton1Click:Connect(function()
-        HOP.visited = {}; saveVisited(); HOP.status = "lista de visitados vacia"
+        HOP.visited = {}; saveVisited(); HOP.status = "visited list cleared"
     end)
 
     hubStatusLbl = new("TextLabel", {
@@ -1241,17 +1241,17 @@ do
     }, pHub)
 
     --------------------------------------------------------------- WEBHOOK
-    fieldOn(pHook, "URL DEL WEBHOOK DE DISCORD", 0, "https://discord.com/api/webhooks/...",
+    fieldOn(pHook, "DISCORD WEBHOOK URL", 0, "https://discord.com/api/webhooks/...",
         WH.url, function(v) WH.url = v end)
 
     local _, paintWh = toggleOn(pHook, 50, function() return WH.enabled end,
-        function(v) WH.enabled = v end, "avisar por webhook")
+        function(v) WH.enabled = v end, "notify via webhook")
 
     new("TextLabel", {
         Position = UDim2.new(0,2,0,86), Size = UDim2.new(1,-4,0,12),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 9,
         TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = C.mut,
-        Text = "RAREZAS A NOTIFICAR",
+        Text = "RARITIES TO NOTIFY",
     }, pHook)
 
     local chips = new("ScrollingFrame", {
@@ -1317,40 +1317,40 @@ do
         Position = UDim2.new(0,0,1,-30), Size = UDim2.new(0,180,0,28),
         BackgroundColor3 = C.acc, BorderSizePixel = 0, Font = Enum.Font.GothamBold,
         TextSize = 10.5, TextColor3 = Color3.new(1,1,1),
-        Text = "COPIAR DIAGNOSTICO", AutoButtonColor = false,
+        Text = "COPY DIAGNOSTICS", AutoButtonColor = false,
     }, pDiag)
     corner(copyBtn, 7)
     copyBtn.MouseButton1Click:Connect(function()
         local set = setclipboard or toclipboard or (syn and syn.write_clipboard)
         local plain = diagText:gsub("<[^>]->", "")
         if set and pcall(set, plain) then
-            copyBtn.Text = "COPIADO ✓"
+            copyBtn.Text = "COPIED ✓"
         else
             print("[SAE DIAG]\n" .. plain)
-            copyBtn.Text = "EN LA CONSOLA (F9)"
+            copyBtn.Text = "IN THE CONSOLE (F9)"
         end
-        task.delay(2, function() copyBtn.Text = "COPIAR DIAGNOSTICO" end)
+        task.delay(2, function() copyBtn.Text = "COPY DIAGNOSTICS" end)
     end)
 
     selectTab("result")
 end
 
 ----------------------------------------------------------------------
--- PINTADO
+-- PAINT
 ----------------------------------------------------------------------
 local PHASE_COLOR = {
-    espera       = C.warn,
-    escaneando   = C.acc2,
-    enviando     = C.acc,
-    listo        = C.ok,
+    waiting      = C.warn,
+    scanning     = C.acc2,
+    sending      = C.acc,
+    done         = C.ok,
     error        = C.bad,
 }
 local PHASE_TEXT = {
-    espera       = "esperando al server",
-    escaneando   = "escaneando",
-    enviando     = "enviando al hub",
-    listo        = "reporte enviado",
-    error        = "no se pudo enviar",
+    waiting      = "waiting for the server",
+    scanning     = "scanning",
+    sending      = "sending to the hub",
+    done         = "report sent",
+    error        = "could not send",
 }
 
 local acc = 0
@@ -1363,7 +1363,7 @@ RunService.RenderStepped:Connect(function(dt)
     phaseLbl.Text = PHASE_TEXT[SCAN.phase] or SCAN.phase
     phaseLbl.TextColor3 = (SCAN.phase == "error") and C.bad or C.txt
     detailLbl.Text = SCAN.detail
-    rescanLbl.Text = scanning and "ESCANEANDO…" or "RE-ESCANEAR"
+    rescanLbl.Text = scanning and "SCANNING…" or "RESCAN"
 
     pcall(refreshLabels)
 
@@ -1381,7 +1381,7 @@ RunService.RenderStepped:Connect(function(dt)
                 t.Text = string.format(
                     '<font color="#%s"><b>%s</b></font>\n%s · <b>%s kg</b> · %dm · %s',
                     e.color:ToHex(), e.name, e.rarity, comma(e.kg), math.floor(dist),
-                    (e.area ~= "" and e.area:upper() or "ZONA"))
+                    (e.area ~= "" and e.area:upper() or "ZONE"))
             end
         end
         if i <= 60 then
@@ -1394,35 +1394,35 @@ RunService.RenderStepped:Connect(function(dt)
 
     if #rows > 0 then
         listBody.Text = table.concat(rows, "\n")
-    elseif SCAN.phase == "listo" then
-        listBody.Text = '<font color="#6c748a">este server no tenia huevos de zona resolubles</font>'
+    elseif SCAN.phase == "done" then
+        listBody.Text = '<font color="#6c748a">this server had no resolvable zone eggs</font>'
     else
         listBody.Text = '<font color="#6c748a">' .. table.concat(DIAG, "\n") .. '</font>'
     end
 
-    -- ── diagnostico ────────────────────────────────────────────────────────
+    -- ── diagnostics ────────────────────────────────────────────────────────
     if diagBody then
         local D = SCAN.diag or {}
         local nAssets = 0; for _ in pairs(assetIndex) do nAssets = nAssets + 1 end
         local L = {}
         local function add(s) L[#L+1] = s end
 
-        add("MODULOS DEL JUEGO")
-        add(("  EggState   %s"):format(EggState   and "OK" or "NO CARGA  <-- sin esto no hay records"))
+        add("GAME MODULES")
+        add(("  EggState   %s"):format(EggState   and "OK" or "NOT LOADED  <-- no records without this"))
         add(("  EggRecords %s"):format(EggRecords and "OK" or "NO CARGA"))
-        add(("  Data.Assets %s"):format(Assets    and "OK" or "NO CARGA  <-- sin esto no hay rarezas"))
-        add(("  assets indexados: %d   rarezas: %d   zonas: %d"):format(nAssets, #rarityList, #AREAS))
+        add(("  Data.Assets %s"):format(Assets    and "OK" or "NOT LOADED  <-- no rarities without this"))
+        add(("  assets indexed: %d   rarities: %d   zones: %d"):format(nAssets, #rarityList, #AREAS))
         add("")
-        add("ULTIMO ESCANEO")
-        add(("  modelos de zona:   %d"):format(D.zone or 0))
-        add(("  modelos de base:   %d  (nunca se envian)"):format(SCAN.base or 0))
-        add(("  records leidos:    %d"):format(D.records or 0))
-        add(("  resueltos:         %d"):format(SCAN.found or 0))
-        add(("  descartados:       %d"):format(SCAN.skipped or 0))
+        add("LAST SCAN")
+        add(("  zone models:       %d"):format(D.zone or 0))
+        add(("  base models:       %d  (never sent)"):format(SCAN.base or 0))
+        add(("  records read:      %d"):format(D.records or 0))
+        add(("  resolved:          %d"):format(SCAN.found or 0))
+        add(("  discarded:         %d"):format(SCAN.skipped or 0))
 
         if D.why and next(D.why) then
             add("")
-            add("POR QUE SE DESCARTARON")
+            add("WHY THEY WERE DISCARDED")
             local ks = {}
             for k in pairs(D.why) do ks[#ks+1] = k end
             table.sort(ks)
@@ -1431,24 +1431,24 @@ RunService.RenderStepped:Connect(function(dt)
 
         if D.sampleKeys then
             add("")
-            add("CAMPOS DE UN RECORD REAL")
+            add("FIELDS OF A REAL RECORD")
             add("  " .. D.sampleKeys)
             add("  DisplayName -> " .. tostring(D.sampleName))
         elseif (D.zone or 0) > 0 then
             add("")
-            add("  NINGUN record encontrado para los huevos de zona.")
-            add("  Es lo que hay que mirar: sin record no se puede saber la rareza.")
+            add("  NO record found for the zone eggs.")
+            add("  That is the thing to look at: no record means no rarity.")
         end
 
         if D.misses and #D.misses > 0 then
             add("")
-            add("EJEMPLOS QUE FALLARON")
+            add("EXAMPLES THAT FAILED")
             for _, m in ipairs(D.misses) do add("  " .. m) end
         end
 
         if #DIAG > 0 then
             add("")
-            add("ARRANQUE")
+            add("STARTUP")
             for _, d in ipairs(DIAG) do add("  " .. d) end
         end
 
@@ -1458,10 +1458,10 @@ RunService.RenderStepped:Connect(function(dt)
 
     local nvis = 0; for _ in pairs(HOP.visited) do nvis = nvis + 1 end
     hubStatusLbl.Text = string.format(
-        "hub: %s\nsubidos:%d  ultima:%dms  ·  saltos:%d  visitados:%d\n%s",
+        "hub: %s\nuploaded:%d  last:%dms  ·  hops:%d  visited:%d\n%s",
         HUB.status, HUB.count, HUB.lastMs, HOP.hops, nvis, HOP.status)
 
-    whStatusLbl.Text = string.format("cola:%d  enviados:%d  ·  %s", #WH.queue, WH.count, WH.status)
+    whStatusLbl.Text = string.format("queue:%d  sent:%d  ·  %s", #WH.queue, WH.count, WH.status)
 end)
 
 UserInputService.InputBegan:Connect(function(i, gp)
@@ -1473,6 +1473,6 @@ UserInputService.InputBegan:Connect(function(i, gp)
     end
 end)
 
--- Arranca solo: entras al server, escanea, manda una vez, y si el auto hop
--- esta encendido salta al siguiente.
+-- Starts on its own: you enter the server, it scans, sends once, and if auto
+-- hop is on it moves to the next one.
 runScan(false)
