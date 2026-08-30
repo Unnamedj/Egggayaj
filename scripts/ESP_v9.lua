@@ -57,8 +57,13 @@ local CFG = {
     -- escaneo unico
     SCAN_STEP      = 0.6,   -- s entre pasadas de comprobacion
     SCAN_STABLE    = 3,     -- pasadas identicas seguidas para dar por bueno
-    SCAN_TIMEOUT   = 22,    -- s como mucho esperando a que se estabilice
-    SCAN_MINWAIT   = 3,     -- s minimos antes de aceptar un resultado vacio
+    SCAN_TIMEOUT   = 35,    -- s como mucho por tanda
+    -- En estos servers practicamente siempre hay huevos, asi que un cero no se
+    -- acepta rapido: se insiste EMPTY_HOLD segundos y luego se repite el ciclo
+    -- entero EMPTY_RETRIES veces antes de creerselo.
+    EMPTY_HOLD     = 18,
+    EMPTY_RETRIES  = 2,
+    RETRY_WAIT     = 5,
     HEARTBEAT      = 120,   -- s entre latidos que mantienen vivo el reporte
 
     -- auto hop
@@ -363,7 +368,9 @@ local function hubBase()
 end
 
 local SCAN = {
-    phase   = "espera",   -- espera | escaneando | enviando | listo | error
+    -- espera | escaneando | reintentando | enviando | listo | error
+    phase   = "espera",
+    failStreak = 0,
     passes  = 0,
     stable  = 0,
     found   = 0,
@@ -767,6 +774,47 @@ end)
 ----------------------------------------------------------------------
 local scanning = false
 
+-- Una tanda de pasadas hasta que el resultado deje de cambiar.
+-- Cero NO es una respuesta rapida: en estos servers siempre hay huevos, asi que
+-- tres ceros seguidos significan "aun no ha cargado", no "esta vacio".
+local function scanUntilStable(attempt)
+    local started = os.clock()
+    local prevSig = nil
+    local eggs, skipped, base, nrec, D = {}, 0, 0, 0, nil
+    SCAN.stable = 0
+
+    while true do
+        task.wait(CFG.SCAN_STEP)
+        eggs, skipped, base, nrec, D = scanOnce()
+        SCAN.passes = SCAN.passes + 1
+        SCAN.found, SCAN.skipped, SCAN.base, SCAN.diag = #eggs, skipped, base, D
+        SCAN.phase = "escaneando"
+
+        local sig = signature(eggs)
+        if sig == prevSig then SCAN.stable = SCAN.stable + 1 else SCAN.stable = 0 end
+        prevSig = sig
+
+        local elapsed = os.clock() - started
+        local settled
+        if #eggs > 0 then
+            -- Hay huevos resueltos: en cuanto la lista deje de moverse, listo.
+            settled = SCAN.stable >= CFG.SCAN_STABLE
+            SCAN.detail = ("intento %d · pasada %d · %d resueltos · estable %d/%d")
+                :format(attempt, SCAN.passes, #eggs, SCAN.stable, CFG.SCAN_STABLE)
+        else
+            -- Cero. Insiste: los modelos y los records del juego tardan en
+            -- llegar, y darlo por vacio pronto era justo el fallo que mandaba
+            -- reportes en blanco y saltaba de server.
+            settled = elapsed >= CFG.EMPTY_HOLD and SCAN.stable >= CFG.SCAN_STABLE
+            SCAN.detail = ("intento %d · aun 0 huevos · %ds/%ds insistiendo · %d modelos de zona")
+                :format(attempt, math.floor(elapsed), CFG.EMPTY_HOLD, (D and D.zone) or 0)
+        end
+
+        if settled or elapsed >= CFG.SCAN_TIMEOUT then break end
+    end
+    return eggs, skipped, base, nrec, D
+end
+
 runScan = function(manual)
     if scanning then return end
     scanning = true
@@ -775,50 +823,47 @@ runScan = function(manual)
         SCAN.phase, SCAN.passes, SCAN.stable = "espera", 0, 0
         SCAN.detail = "esperando a que cargue el server"
 
-        local started  = os.clock()
-        local prevSig  = nil
-        local eggs, skipped, base, nrec, D = {}, 0, 0, 0, nil
+        local eggs, skipped, base, nrec, D
 
-        while true do
-            task.wait(CFG.SCAN_STEP)
-            eggs, skipped, base, nrec, D = scanOnce()
-            SCAN.passes = SCAN.passes + 1
-            SCAN.found, SCAN.skipped, SCAN.base = #eggs, skipped, base
-            SCAN.diag = D
-            SCAN.phase = "escaneando"
-
-            local sig = signature(eggs)
-            if sig == prevSig then SCAN.stable = SCAN.stable + 1 else SCAN.stable = 0 end
-            prevSig = sig
-
-            local elapsed = os.clock() - started
-            SCAN.detail = string.format("pasada %d · %d resueltos · %d sin record · estable %d/%d",
-                SCAN.passes, #eggs, skipped, SCAN.stable, CFG.SCAN_STABLE)
-
-            -- Estable y con algo dentro: listo. Vacio: espera un minimo por si
-            -- los modelos aun estan cargando, y luego acepta el vacio.
-            local settled = SCAN.stable >= CFG.SCAN_STABLE
-                and (#eggs > 0 or elapsed >= CFG.SCAN_MINWAIT)
-            if settled or elapsed >= CFG.SCAN_TIMEOUT then break end
+        -- El ciclo entero se repite si sale a cero. Un server de este juego
+        -- practicamente nunca esta vacio de verdad.
+        for attempt = 1, CFG.EMPTY_RETRIES + 1 do
+            eggs, skipped, base, nrec, D = scanUntilStable(attempt)
+            if #eggs > 0 then break end
+            if attempt <= CFG.EMPTY_RETRIES then
+                SCAN.phase = "reintentando"
+                SCAN.detail = ("intento %d dio 0 huevos · reintento completo en %ds")
+                    :format(attempt, CFG.RETRY_WAIT)
+                task.wait(CFG.RETRY_WAIT)
+            end
         end
 
         SCAN.eggs = eggs
+        local zone = (D and D.zone) or 0
 
-        -- Guardarrail: habia huevos de zona delante y no resolvimos ninguno.
-        -- Mandar full=true con la lista vacia le diria al hub "aqui no hay
-        -- nada" y borraria lo bueno de un reporte anterior. Mejor no mandar y
-        -- gritarlo en el panel.
-        if #eggs == 0 and (D and D.zone or 0) > 0 then
+        -- Habia modelos de zona delante y no se resolvio ninguno: es un fallo
+        -- de resolucion, no un server vacio. Mandar full=true con lista vacia
+        -- le diria al hub "aqui no hay nada" y borraria un reporte bueno.
+        if #eggs == 0 and zone > 0 then
+            SCAN.failStreak = (SCAN.failStreak or 0) + 1
             SCAN.phase = "error"
             SCAN.doneAt = os.time()
             SCAN.sent = 0
-            SCAN.detail = string.format(
-                "%d huevos de zona y 0 resueltos · no se manda nada para no borrar el hub · mira DIAGNOSTICO",
-                D.zone)
+            SCAN.detail = ("%d modelos de zona y 0 resueltos tras %d intentos · no se manda nada · mira DIAGNOSTICO")
+                :format(zone, CFG.EMPTY_RETRIES + 1)
             scanning = false
+
+            -- Si falla en varios servers seguidos el problema no es el server:
+            -- dejar de saltar y quedarse quieto para que se pueda mirar.
+            if SCAN.failStreak >= 3 then
+                HOP.status = "parado: " .. SCAN.failStreak .. " servers seguidos sin resolver nada"
+                return
+            end
+            if HOP.enabled and not manual then task.wait(2); doHop() end
             return
         end
 
+        SCAN.failStreak = 0
         SCAN.phase = "enviando"
         SCAN.detail = ("mandando %d huevos"):format(#eggs)
 
@@ -829,12 +874,13 @@ runScan = function(manual)
         SCAN.doneAt = os.time()
         SCAN.phase = ok and "listo" or "error"
         SCAN.detail = ok
-            and string.format("%d enviados · %d sin record · %d de base ignorados",
-                #eggs, skipped, base)
+            and ("%d enviados · %d sin record · %d de base ignorados")
+                :format(#eggs, skipped, base)
             or ("no se pudo enviar: " .. tostring(err))
 
         scanning = false
 
+        -- El salto va SIEMPRE al final, y solo si el reporte llego de verdad.
         if ok and HOP.enabled and not manual then
             task.wait(1)
             doHop()
@@ -1279,18 +1325,20 @@ end
 -- PINTADO
 ----------------------------------------------------------------------
 local PHASE_COLOR = {
-    espera     = C.warn,
-    escaneando = C.acc2,
-    enviando   = C.acc,
-    listo      = C.ok,
-    error      = C.bad,
+    espera       = C.warn,
+    escaneando   = C.acc2,
+    reintentando = C.warn,
+    enviando     = C.acc,
+    listo        = C.ok,
+    error        = C.bad,
 }
 local PHASE_TEXT = {
-    espera     = "esperando al server",
-    escaneando = "escaneando",
-    enviando   = "enviando al hub",
-    listo      = "reporte enviado",
-    error      = "no se pudo enviar",
+    espera       = "esperando al server",
+    escaneando   = "escaneando",
+    reintentando = "0 huevos · reintentando",
+    enviando     = "enviando al hub",
+    listo        = "reporte enviado",
+    error        = "no se pudo enviar",
 }
 
 local acc = 0

@@ -294,7 +294,7 @@
 
         <div class="srv-foot">
           <span title="Último reporte recibido">reporte <b class="age" data-at="${s.updatedAt}">hace ${ago(s.staleMs)}</b></span>
-          <span title="Tiempo desde el primer reporte">· vivo ${ago(s.aliveMs)}</span>
+          <span title="Tiempo desde el primer reporte">· vivo <span class="age" data-at="${s.firstSeen}" data-prefix="">${ago(s.aliveMs)}</span></span>
           <div class="acts">
             <button class="mini" data-a="job" title="Copiar Job ID">${ICON.copy}</button>
             <button class="mini go" data-a="join" title="Copiar comando de join">${ICON.join}</button>
@@ -403,7 +403,10 @@
       const at = Number(el.dataset.at);
       if (!at) return;
       const d = now - at;
-      el.textContent = "hace " + ago(d);
+      // data-prefix="" para las que no son un "hace X" (p.ej. "vivo 4m"), que
+      // si no se quedaban congeladas y podian leerse mas cortas que el reporte.
+      const prefix = el.dataset.prefix === undefined ? "hace " : el.dataset.prefix;
+      el.textContent = prefix + ago(d);
       el.classList.toggle("hot", d < 60000);
     });
   }

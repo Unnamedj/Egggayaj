@@ -46,6 +46,41 @@ En el **ESP** (tab HUB) y en el **AJ** (tab engranaje), pon la misma
 
 ---
 
+## El reporter mandaba servers con 0 huevos y saltaba
+
+`SCAN_MINWAIT = 3`. Cuatro pasadas de 0,6 s dando cero, la firma «se estabiliza»,
+y a los 3 segundos daba el server por vacío, mandaba el reporte en blanco y
+saltaba al siguiente. Tres ceros seguidos solo significan **«aún no ha
+cargado»**, y yo lo tomé por una respuesta válida.
+
+En estos servers prácticamente siempre hay huevos, así que un cero es siempre un
+fallo, nunca un dato. Ahora:
+
+- Con huevos resueltos, basta con que la lista deje de moverse.
+- Con cero, se insiste **18 s** y luego se repite el **ciclo entero** hasta 2
+  veces más antes de creérselo.
+- El salto va siempre al final, y solo si el reporte llegó de verdad.
+
+```
+ESCENARIO                        ANTES                    AHORA
+carga rapida (1s)                5 huevos @ 3.0s          5 huevos @ 3.0s
+carga normal (6s)                0 huevos @ 3.0s   ✗      5 huevos @ 8.4s
+carga lenta (15s)                0 huevos @ 3.0s   ✗      5 huevos @ 17.4s
+muy lenta (28s)                  0 huevos @ 3.0s   ✗      5 huevos @ 30.2s (2 intentos)
+modelos a 2s, records a 12s      0 huevos @ 3.0s   ✗      5 huevos @ 14.4s
+server VACIO de verdad           0 huevos @ 3.0s          0 huevos @ 64.0s (3 intentos)
+```
+
+Si hay modelos de zona delante y aun así no se resuelve ninguno, no se manda
+nada (un `full=true` vacío borraría un reporte bueno del hub). Y si eso pasa en
+3 servers seguidos deja de saltar: el problema ya no es el server.
+
+También arreglado en el dashboard: *«reporte hace 37s · vivo 26s»* era
+imposible. El primero corría en vivo y el segundo se quedaba congelado al
+pintar; ahora los dos avanzan juntos.
+
+---
+
 ## Los hallazgos no llegaban al AJ
 
 Fallo de diseño mío: junté dos cambios que por separado están bien y juntos se
