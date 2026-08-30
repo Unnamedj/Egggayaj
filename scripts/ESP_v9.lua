@@ -6,9 +6,18 @@
 
       El v8 reescaneaba cada segundo y subia correcciones sobre la marcha. Eso
       hacia que un huevo llegara al hub con una rareza y se corrigiera despues,
-      o peor, que se quedara con la equivocada. El v9 escanea, espera a que el
-      resultado se repita igual varias veces seguidas, y ENTONCES manda UNA vez
-      todo el server de golpe. Un server, un reporte, sin correcciones.
+      o peor, que se quedara con la equivocada.
+
+      El v9 hace cuatro cosas, en este orden y sin adelantarse:
+
+        1. ESPERA a que el server termine de cargar. No escanea para saberlo:
+           escucha el ChildAdded del contenedor de huevos. Mientras sigan
+           apareciendo modelos el server sigue cargando; cuando lleva QUIET
+           segundos sin novedades, ya esta. Asi se adapta solo a un server
+           rapido o a uno que tarda 30s, sin numeros magicos.
+        2. UN escaneo. Uno solo.
+        3. Manda ese resultado de una vez, con full=true.
+        4. Y solo entonces salta al siguiente server.
 
     Por que se equivocaba de rarezas (los tres fallos, ya corregidos):
 
@@ -54,16 +63,12 @@ local CFG = {
     CONFIG_FILE    = "jf_reporter_v9.json",
     VISITED_FILE   = "jf_esp_visited.json",
 
-    -- escaneo unico
-    SCAN_STEP      = 0.6,   -- s entre pasadas de comprobacion
-    SCAN_STABLE    = 3,     -- pasadas identicas seguidas para dar por bueno
-    SCAN_TIMEOUT   = 35,    -- s como mucho por tanda
-    -- En estos servers practicamente siempre hay huevos, asi que un cero no se
-    -- acepta rapido: se insiste EMPTY_HOLD segundos y luego se repite el ciclo
-    -- entero EMPTY_RETRIES veces antes de creerselo.
-    EMPTY_HOLD     = 18,
-    EMPTY_RETRIES  = 2,
-    RETRY_WAIT     = 5,
+    -- Esperar a que el server cargue, y ENTONCES una sola pasada.
+    -- No hace falta escanear para saber si ha terminado de cargar: el
+    -- contenedor de huevos avisa cada vez que le añaden un modelo, asi que
+    -- basta con esperar a que deje de avisar.
+    QUIET          = 2.5,   -- s sin modelos nuevos = el server ya cargo
+    READY_TIMEOUT  = 60,    -- s como mucho esperando esa señal
     HEARTBEAT      = 120,   -- s entre latidos que mantienen vivo el reporte
 
     -- auto hop
@@ -368,7 +373,7 @@ local function hubBase()
 end
 
 local SCAN = {
-    -- espera | escaneando | reintentando | enviando | listo | error
+    -- espera | escaneando | enviando | listo | error
     phase   = "espera",
     failStreak = 0,
     passes  = 0,
@@ -526,14 +531,61 @@ local function scanOnce()
     return eggs, skipped, base, nrec, D
 end
 
--- Huella del resultado: si dos pasadas seguidas dan la misma, el server ya
--- termino de cargar y podemos mandar.
-local function signature(eggs)
-    local parts = {}
-    for _, e in ipairs(eggs) do
-        parts[#parts+1] = string.format("%s:%s:%d", e.uid, e.rarity, math.floor(e.kg))
+-- Espera a que el server este cargado de verdad. Esto NO escanea: mira si el
+-- cliente cargo, si hay personaje, si existe el contenedor de zona, y sobre
+-- todo escucha su ChildAdded. Mientras sigan apareciendo modelos, el server
+-- sigue cargando; cuando lleva QUIET segundos sin novedades, ya esta.
+-- Devuelve el contenedor, o nil y el motivo.
+local function waitForServer()
+    local t0 = os.clock()
+    local function timeLeft() return CFG.READY_TIMEOUT - (os.clock() - t0) end
+
+    SCAN.phase = "espera"
+
+    SCAN.detail = "esperando a que cargue el cliente"
+    if not game:IsLoaded() then pcall(function() game.Loaded:Wait() end) end
+
+    SCAN.detail = "esperando al personaje"
+    if not LocalPlayer.Character then
+        pcall(function() LocalPlayer.CharacterAdded:Wait() end)
     end
-    return table.concat(parts, "|")
+
+    SCAN.detail = "esperando la zona de huevos"
+    local zone = Workspace:FindFirstChild(CFG.ZONE_CONTAINER)
+    if not zone then
+        local ok, z = pcall(function()
+            return Workspace:WaitForChild(CFG.ZONE_CONTAINER, math.max(1, timeLeft()))
+        end)
+        zone = ok and z or nil
+    end
+    if not zone then return nil, "no aparecio " .. CFG.ZONE_CONTAINER end
+
+    local lastAdd = os.clock()
+    local conn = zone.ChildAdded:Connect(function() lastAdd = os.clock() end)
+
+    while true do
+        task.wait(0.3)
+        local quiet  = os.clock() - lastAdd
+        local models = #zone:GetChildren()
+        SCAN.detail = ("%d modelos en la zona · %.1fs sin novedades"):format(models, quiet)
+
+        if models > 0 and quiet >= CFG.QUIET then
+            -- collectRecords es caro, asi que solo se comprueba cuando el
+            -- contenedor ya esta quieto. Los records del juego pueden llegar
+            -- despues que los modelos.
+            local _, nrec = collectRecords()
+            if nrec > 0 then
+                conn:Disconnect()
+                return zone
+            end
+            SCAN.detail = ("%d modelos, esperando los datos del juego"):format(models)
+        end
+
+        if timeLeft() <= 0 then
+            conn:Disconnect()
+            return zone, "se agoto la espera"
+        end
+    end
 end
 
 ----------------------------------------------------------------------
@@ -774,71 +826,32 @@ end)
 ----------------------------------------------------------------------
 local scanning = false
 
--- Una tanda de pasadas hasta que el resultado deje de cambiar.
--- Cero NO es una respuesta rapida: en estos servers siempre hay huevos, asi que
--- tres ceros seguidos significan "aun no ha cargado", no "esta vacio".
-local function scanUntilStable(attempt)
-    local started = os.clock()
-    local prevSig = nil
-    local eggs, skipped, base, nrec, D = {}, 0, 0, 0, nil
-    SCAN.stable = 0
-
-    while true do
-        task.wait(CFG.SCAN_STEP)
-        eggs, skipped, base, nrec, D = scanOnce()
-        SCAN.passes = SCAN.passes + 1
-        SCAN.found, SCAN.skipped, SCAN.base, SCAN.diag = #eggs, skipped, base, D
-        SCAN.phase = "escaneando"
-
-        local sig = signature(eggs)
-        if sig == prevSig then SCAN.stable = SCAN.stable + 1 else SCAN.stable = 0 end
-        prevSig = sig
-
-        local elapsed = os.clock() - started
-        local settled
-        if #eggs > 0 then
-            -- Hay huevos resueltos: en cuanto la lista deje de moverse, listo.
-            settled = SCAN.stable >= CFG.SCAN_STABLE
-            SCAN.detail = ("intento %d · pasada %d · %d resueltos · estable %d/%d")
-                :format(attempt, SCAN.passes, #eggs, SCAN.stable, CFG.SCAN_STABLE)
-        else
-            -- Cero. Insiste: los modelos y los records del juego tardan en
-            -- llegar, y darlo por vacio pronto era justo el fallo que mandaba
-            -- reportes en blanco y saltaba de server.
-            settled = elapsed >= CFG.EMPTY_HOLD and SCAN.stable >= CFG.SCAN_STABLE
-            SCAN.detail = ("intento %d · aun 0 huevos · %ds/%ds insistiendo · %d modelos de zona")
-                :format(attempt, math.floor(elapsed), CFG.EMPTY_HOLD, (D and D.zone) or 0)
-        end
-
-        if settled or elapsed >= CFG.SCAN_TIMEOUT then break end
-    end
-    return eggs, skipped, base, nrec, D
-end
-
 runScan = function(manual)
     if scanning then return end
     scanning = true
 
     task.spawn(function()
-        SCAN.phase, SCAN.passes, SCAN.stable = "espera", 0, 0
-        SCAN.detail = "esperando a que cargue el server"
+        SCAN.phase, SCAN.passes = "espera", 0
 
-        local eggs, skipped, base, nrec, D
-
-        -- El ciclo entero se repite si sale a cero. Un server de este juego
-        -- practicamente nunca esta vacio de verdad.
-        for attempt = 1, CFG.EMPTY_RETRIES + 1 do
-            eggs, skipped, base, nrec, D = scanUntilStable(attempt)
-            if #eggs > 0 then break end
-            if attempt <= CFG.EMPTY_RETRIES then
-                SCAN.phase = "reintentando"
-                SCAN.detail = ("intento %d dio 0 huevos · reintento completo en %ds")
-                    :format(attempt, CFG.RETRY_WAIT)
-                task.wait(CFG.RETRY_WAIT)
-            end
+        -- 1. Esperar. Aqui no se escanea nada: solo se espera la señal de que
+        --    el server termino de cargar.
+        local zoneFolder, warn = waitForServer()
+        if not zoneFolder then
+            SCAN.phase = "error"
+            SCAN.detail = tostring(warn)
+            SCAN.doneAt = os.time()
+            scanning = false
+            return
         end
 
+        -- 2. Un escaneo. Uno solo.
+        SCAN.phase = "escaneando"
+        SCAN.detail = "escaneo unico"
+        local eggs, skipped, base, nrec, D = scanOnce()
+        SCAN.passes = 1
+        SCAN.found, SCAN.skipped, SCAN.base, SCAN.diag = #eggs, skipped, base, D
         SCAN.eggs = eggs
+
         local zone = (D and D.zone) or 0
 
         -- Habia modelos de zona delante y no se resolvio ninguno: es un fallo
@@ -849,8 +862,8 @@ runScan = function(manual)
             SCAN.phase = "error"
             SCAN.doneAt = os.time()
             SCAN.sent = 0
-            SCAN.detail = ("%d modelos de zona y 0 resueltos tras %d intentos · no se manda nada · mira DIAGNOSTICO")
-                :format(zone, CFG.EMPTY_RETRIES + 1)
+            SCAN.detail = ("%d modelos de zona y 0 resueltos · no se manda nada · mira DIAGNOSTICO")
+                :format(zone)
             scanning = false
 
             -- Si falla en varios servers seguidos el problema no es el server:
@@ -863,6 +876,7 @@ runScan = function(manual)
             return
         end
 
+        -- 3. Enviar.
         SCAN.failStreak = 0
         SCAN.phase = "enviando"
         SCAN.detail = ("mandando %d huevos"):format(#eggs)
@@ -880,7 +894,7 @@ runScan = function(manual)
 
         scanning = false
 
-        -- El salto va SIEMPRE al final, y solo si el reporte llego de verdad.
+        -- 4. Y solo ahora, el salto. Nunca antes, y solo si el reporte llego.
         if ok and HOP.enabled and not manual then
             task.wait(1)
             doHop()
@@ -1327,7 +1341,6 @@ end
 local PHASE_COLOR = {
     espera       = C.warn,
     escaneando   = C.acc2,
-    reintentando = C.warn,
     enviando     = C.acc,
     listo        = C.ok,
     error        = C.bad,
@@ -1335,7 +1348,6 @@ local PHASE_COLOR = {
 local PHASE_TEXT = {
     espera       = "esperando al server",
     escaneando   = "escaneando",
-    reintentando = "0 huevos · reintentando",
     enviando     = "enviando al hub",
     listo        = "reporte enviado",
     error        = "no se pudo enviar",

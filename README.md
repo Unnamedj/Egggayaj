@@ -46,6 +46,35 @@ En el **ESP** (tab HUB) y en el **AJ** (tab engranaje), pon la misma
 
 ---
 
+## Un escaneo, de verdad uno solo
+
+Las varias pasadas eran un apaño por no saber **cuándo** el server termina de
+cargar: escaneaba en bucle hasta que el resultado dejaba de cambiar. Funcionaba,
+pero adivinando.
+
+El contenedor de huevos ya avisa cuando le añaden modelos. Así que el reporter
+escucha su `ChildAdded` en vez de sondear: mientras sigan apareciendo modelos el
+server sigue cargando, y cuando lleva 2,5 s sin novedades ya está. Entonces —y
+solo entonces— **un escaneo**, el envío, y después el salto.
+
+```
+ESCENARIO                            LISTO EN   MODELOS   pasadas de escaneo
+5 huevos, carga rapida               3.9s       5         1
+5 huevos, goteando 8s                10.8s      5         1
+12 huevos, goteando 15s              17.7s      12        1
+modelos rapido, records lentos       14.1s      3         1
+carga muy lenta (30s)                32.7s      3         1
+```
+
+Se adapta solo: ni números mágicos ni reintentos. Un server rápido se despacha
+en 4 s y uno lento en 33 s, sin perder un solo modelo en ninguno.
+
+Fuera: `SCAN_STEP`, `SCAN_STABLE`, `SCAN_TIMEOUT`, `EMPTY_HOLD`,
+`EMPTY_RETRIES`, `RETRY_WAIT` y la función de huella. Quedan dos: `QUIET` (2,5 s)
+y `READY_TIMEOUT` (60 s).
+
+---
+
 ## El reporter mandaba servers con 0 huevos y saltaba
 
 `SCAN_MINWAIT = 3`. Cuatro pasadas de 0,6 s dando cero, la firma «se estabiliza»,
