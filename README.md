@@ -19,8 +19,8 @@ ESP v8  ──POST /api/report──▶  HUB  ──POST /api/claim──▶  AJ
 | `lib/store.js` | Estado en memoria: servers, huevos, claims, log de actividad |
 | `lib/rarity.js` | La escalera de rarezas real del juego (Common → Titan) |
 | `public/index.html` · `app.js` · `styles.css` | Dashboard |
-| `scripts/ESP_v8.lua` | ESP: escanea y reporta **solo huevos de zona** |
-| `scripts/AJ_v3.lua` | Auto joiner: solo salta a hallazgos **nuevos** |
+| `scripts/ESP_v9.lua` | Reporter: **un escaneo, un reporte**, solo huevos de zona |
+| `scripts/AJ_v4.lua` | Auto joiner: solo hallazgos **nuevos**, y te dice por qué si no salta |
 | `Dockerfile` · `railway.json` | Despliegue |
 
 ## Deploy en Railway
@@ -46,7 +46,67 @@ En el **ESP** (tab HUB) y en el **AJ** (tab engranaje), pon la misma
 
 ---
 
-## Qué cambió en esta versión
+## v9 / v4 — por qué el AJ no saltaba
+
+Tres fallos distintos, los tres reproducidos con test antes de tocar nada.
+
+### 1. Un filtro imposible que no avisaba
+
+Si la lista de rarezas del AJ iba vacía, Lua la mandaba como `{}` y el hub la
+convertía en el texto `"[object Object]"`: un filtro que **no coincide con nada,
+nunca**. El AJ se quedaba mudo y parecía que el hub no recibía.
+
+Ahora un valor que no es una lista usable significa *sin filtro*, y el AJ nunca
+manda una lista vacía.
+
+### 2. El ESP se equivocaba de rarezas
+
+Tres causas, todas en cómo se ataba cada huevo a su record:
+
+| | Qué pasaba | Ahora |
+|---|---|---|
+| `pairs(rec)` | Recorría el record y se quedaba con el primer texto que sonara a asset. Sin orden garantizado → el mismo huevo podía resolverse como dos assets distintos | Solo campos de asset explícitos, en orden fijo |
+| Claves compartidas | Los records se indexaban también por `Slot`, `Key`, `ModelName`. `Slot_002` se repite en todos los servers, así que **un huevo cogía el record de otro** — un Legendary reportado como Common | Solo identificadores únicos (`Uid`, `Id`), y una clave que dos records reclaman se marca inservible |
+| Adivinar por color | Sin record, deducía la rareza del color del modelo | Lo que no se resuelve con certeza **no se envía** |
+
+### 3. El goteo continuo se corregía a sí mismo
+
+El v8 reescaneaba cada segundo y subía correcciones sobre la marcha. El v9
+escanea, espera a que el resultado se repita 3 veces seguidas, y **entonces**
+manda una vez todo el server con `full=true`. Un server, un reporte.
+
+Si el server tarda en cargar, espera (hasta 22 s). Si está vacío de verdad,
+espera un mínimo de 3 s antes de darlo por bueno. Si nunca se estabiliza, corta
+por tiempo y manda igual.
+
+### Y si aun así no salta, ahora te lo dice
+
+`POST /api/diag` recorre el mismo embudo que `/api/claim` y cuenta cuántos
+huevos caen en cada regla. El AJ lo traduce a una frase y, cuando puede, a un
+botón que lo arregla:
+
+| Situación | Lo que ves |
+|---|---|
+| Nadie reportando | «ningún ESP está reportando» |
+| Servers sin huevos | «los servers están vacíos (3 reportando)» |
+| Filtro de rareza mal | «tus rarezas no existen en el juego» → **MARCAR LAS RARAS** |
+| Todo anterior al cursor | «6 anterior al cursor» → **ACEPTAR LOS DE AHORA** |
+| Rareza no marcada | «4 rareza no marcada» → **IR A FILTROS** |
+
+`/api/diag` y `/api/claim` comparten los mismos jueces (`serverReject` /
+`eggReject`) a propósito: si divergieran, el diagnóstico mentiría justo cuando
+más falta hace.
+
+### Otras cosas del v4
+
+- Interfaz rehecha: pestañas de verdad en vez del carril de iconos dibujados a
+  mano con frames rotados.
+- Config propia (`eag_aj_v4.json`). El v3 reusaba el fichero del v2, así que se
+  heredaban filtros viejos —como `MIN_KG=25`— que tumbaban todo en silencio.
+
+---
+
+## Qué cambió antes (v8 / v3)
 
 ### La escalera de rarezas ahora es la del juego
 
@@ -119,6 +179,7 @@ calculadas contra el reloj del hub y no el del navegador:
 | GET | `/api/meta` | Todos | Stats, escalera de rarezas, cursor `eggSeq` |
 | GET | `/api/servers` | Dashboard | Servers con detalle |
 | GET | `/api/events` | Dashboard | Log de actividad con timestamps |
+| POST | `/api/diag` | AJ | Por qué un filtro no devuelve nada |
 | GET | `/api/stream` | Dashboard | SSE en vivo |
 | POST | `/api/purge` | Admin | Borra todo |
 | GET | `/healthz` | Railway | Health check |

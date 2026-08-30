@@ -84,9 +84,26 @@ function authed(req, url) {
   return keyOf(req, url) === API_KEY;
 }
 
+// Normaliza lo que llega en un campo de lista. Lua no distingue array de
+// diccionario, asi que una tabla vacia puede llegar como [] o como {} segun el
+// executor. Un valor que no sea una lista usable significa "sin filtro":
+// convertirlo en texto daba '[object Object]', un filtro que no casaba con nada
+// y dejaba al AJ mudo sin decir por que.
+function toList(v) {
+  if (v == null) return null;
+  if (Array.isArray(v)) {
+    return v.filter((x) => typeof x === "string" || typeof x === "number").map(String);
+  }
+  if (typeof v === "string") return v.split(",");
+  if (typeof v === "number") return [String(v)];
+  return null;
+}
+
 function parseList(v) {
-  if (!v) return null;
-  const parts = String(v)
+  const items = toList(v);
+  if (!items) return null;
+  const parts = items
+    .join(",")
     .split(",")
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
@@ -120,9 +137,9 @@ function filterFromQuery(q) {
 // Los mismos filtros pero llegando por el cuerpo de un POST (lo que manda el AJ).
 function applyBodyFilter(filter, body) {
   if (!body) return filter;
-  if (body.rarities) filter.rarities = parseList([].concat(body.rarities).join(","));
-  if (body.species) filter.species = parseList([].concat(body.species).join(","));
-  if (body.exclude) filter.excludeJobIds = parseListRaw([].concat(body.exclude).join(","));
+  if (body.rarities != null) filter.rarities = parseList(body.rarities);
+  if (body.species != null) filter.species = parseList(body.species);
+  if (body.exclude != null) filter.excludeJobIds = parseListRaw(body.exclude);
   if (body.minKg != null) filter.minKg = Number(body.minKg);
   if (body.maxKg != null) filter.maxKg = Number(body.maxKg);
   if (body.minRank != null) filter.minRank = Number(body.minRank);
@@ -136,8 +153,10 @@ function applyBodyFilter(filter, body) {
 }
 
 function parseListRaw(v) {
-  if (!v) return null;
-  const parts = String(v)
+  const items = toList(v);
+  if (!items) return null;
+  const parts = items
+    .join(",")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
@@ -287,6 +306,13 @@ const server = http.createServer(async (req, res) => {
     if (p === "/api/servers" && req.method === "GET") {
       const rows = store.serverRows();
       return send(res, 200, { ok: true, now: Date.now(), total: rows.length, servers: rows });
+    }
+
+    if (p === "/api/diag" && (req.method === "POST" || req.method === "GET")) {
+      const body = req.method === "POST" ? await readBody(req) : {};
+      const filter = applyBodyFilter(filterFromQuery(q), body);
+      filter.unclaimedOnly = true;
+      return send(res, 200, Object.assign({ ok: true, now: Date.now() }, store.explain(filter)));
     }
 
     if (p === "/api/events" && req.method === "GET") {
