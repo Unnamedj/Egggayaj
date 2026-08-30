@@ -46,6 +46,35 @@ En el **ESP** (tab HUB) y en el **AJ** (tab engranaje), pon la misma
 
 ---
 
+## `hub: HTTP 404` y la lista de rarezas vacía
+
+Dos síntomas, una causa y un fallo de diseño encima.
+
+**La causa.** Si la URL del hub acaba en `/`, la petición sale como
+`//api/meta`. Node interpreta `//algo` como URL relativa a protocolo: toma
+`api` por host y deja la ruta en `/meta`, que no empieza por `/api/` y acaba
+sirviéndose como fichero estático. 404, y parecía que el hub estuviera caído.
+
+Arreglado en los dos lados: el servidor colapsa las barras repetidas del
+*request target* antes de enrutar (no vale hacerlo sobre el pathname, ahí el
+daño ya está hecho), y los scripts normalizan la URL en **cada** petición —
+antes solo al salir del campo de texto—, quitando barras finales, un `/api`
+sobrante y añadiendo `https://` si falta.
+
+```
+/api/meta     -> 200      //api//meta   -> 200
+//api/meta    -> 200      //healthz     -> 200
+///api/meta   -> 200      /../server.js -> 404  (sigue sin poder salirse)
+```
+
+**El fallo de diseño.** Los chips de rareza salían solo de `/api/meta`, así que
+sin hub te quedabas con el panel vacío y sin pista de por qué. Ahora el AJ lleva
+la escalera integrada (verificada carácter a carácter contra la que sirve el
+hub), la del hub la sustituye cuando responde, y si no responde lo dice: *lista
+local · el hub no responde*.
+
+---
+
 ## El reporter no mandaba nada habiendo legendarios
 
 Me pasé de estricto. Al endurecer la resolución de rarezas rompí la resolución

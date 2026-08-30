@@ -242,8 +242,13 @@ function sse(req, res) {
 
 // ------------------------------------------------------------------- routes
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
-  const p = url.pathname.replace(/\/+$/, "") || "/";
+  // Una HUB_URL pegada con barra final produce "//api/meta". Hay que arreglarlo
+  // ANTES de construir la URL: "//algo" es una URL relativa a protocolo, asi que
+  // el parser toma "api" como host y deja la ruta en "/meta". El resultado era
+  // un 404 que parecia que el hub estuviera caido.
+  const rawUrl = String(req.url || "/").replace(/^\/+/, "/");
+  const url = new URL(rawUrl, `http://${req.headers.host || "localhost"}`);
+  const p = url.pathname.replace(/\/{2,}/g, "/").replace(/\/+$/, "") || "/";
   const q = url.searchParams;
 
   if (req.method === "OPTIONS") {

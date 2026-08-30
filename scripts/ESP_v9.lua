@@ -20,9 +20,16 @@
          acababa cogiendo el record de otro.
       3. Si no habia record, adivinaba la rareza por el color del modelo.
 
-      Ahora: solo campos de asset explicitos, indices unicos con deteccion de
-      colisiones, y lo que no se resuelve con certeza NO se envia. Mejor omitir
-      un huevo que mandarlo con la rareza cambiada.
+      Ahora la busqueda sigue siendo amplia, pero DETERMINISTA: campos con
+      prioridad en orden fijo, luego el nombre visible, y por ultimo el resto
+      de campos solo si todos apuntan al mismo asset. Una colision se juzga por
+      si dos records DISCREPAN, no por si son la misma tabla: el juego devuelve
+      el mismo huevo en dos lecturas distintas y compararlo por identidad
+      anulaba la clave y dejaba el reporte a cero.
+
+      Lo que no se resuelve con certeza no se envia. Y si no se resuelve NADA
+      habiendo huevos delante, no se manda un snapshot vacio: eso le diria al
+      hub que el server esta limpio y borraria un reporte bueno anterior.
 
     Los labels en pantalla siguen refrescandose en vivo: eso es cosmetico y no
     toca la red.
@@ -322,9 +329,11 @@ local function httpPost(url, body, headers)
     if not ok then return false, tostring(res) end
     local code = res and (res.StatusCode or res.Status or res.status_code) or 0
     if code == 401 then return false, "API key incorrecta" end
+    if code == 404 then return false, "404 · revisa la URL del hub" end
     if code >= 200 and code < 300 then return true, res.Body end
     return false, "HTTP " .. tostring(code)
 end
+
 
 local function colorInt(c)
     return math.floor(c.R*255)*65536 + math.floor(c.G*255)*256 + math.floor(c.B*255)
@@ -342,6 +351,15 @@ end
 local WH  = { url="", enabled=false, rarities={}, count=0, status="inactivo", queue={} }
 local HUB = { url="", key="", enabled=true, count=0, status="inactivo", lastMs=0 }
 local HOP = { enabled=false, busy=false, busySince=0, hops=0, visited={}, status="inactivo" }
+
+-- Se normaliza en cada envio, no solo al salir del campo: una barra final
+-- convertia /api/report en //api/report, que el hub servia como fichero (404).
+local function hubBase()
+    local u = tostring(HUB.url or ""):gsub("%s+", "")
+    u = u:gsub("/+$", ""):gsub("/api$", "")
+    if u ~= "" and not u:match("^https?://") then u = "https://" .. u end
+    return u
+end
 
 local SCAN = {
     phase   = "espera",   -- espera | escaneando | enviando | listo | error
@@ -600,7 +618,7 @@ local function sendReport(eggs)
     })
 
     local t0 = os.clock()
-    local ok, err = httpPost(HUB.url .. "/api/report", body, { ["x-eag-key"] = HUB.key })
+    local ok, err = httpPost(hubBase() .. "/api/report", body, { ["x-eag-key"] = HUB.key })
     HUB.lastMs = math.floor((os.clock() - t0) * 1000)
     if ok then
         HUB.count = HUB.count + #payload
@@ -1101,7 +1119,7 @@ do
         saveConfig()
         testBtn.Text = "PROBANDO…"
         task.spawn(function()
-            local ok, err = httpPost(HUB.url .. "/api/report",
+            local ok, err = httpPost(hubBase() .. "/api/report",
                 HttpService:JSONEncode({ jobId = "test-" .. tostring(math.random(10000,99999)), eggs = {} }),
                 { ["x-eag-key"] = HUB.key })
             testBtn.Text = ok and "CONECTADO ✓" or "FALLO"

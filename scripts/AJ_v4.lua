@@ -73,6 +73,31 @@ local function hex(h)
         tonumber(h:sub(5,6),16) or 120)
 end
 
+-- La escalera real del juego, integrada. El hub manda la suya en /api/meta y
+-- la sustituye, pero sin esto los chips de rareza salian VACIOS cuando el hub
+-- no respondia: te quedabas sin poder configurar nada y sin saber por que.
+local FALLBACK_LADDER = {
+    { name="Titan",       rank=11, color="#ff5252" },
+    { name="Divine",      rank=10, color="#f5e63d" },
+    { name="Superior",    rank=10, color="#c3ffff" },
+    { name="Eternal",     rank=9,  color="#ff35ee" },
+    { name="Limited",     rank=9,  color="#c08bff" },
+    { name="Secret",      rank=8,  color="#aab2c0" },
+    { name="Exotic",      rank=8,  color="#ff3df2" },
+    { name="Cosmic",      rank=7,  color="#8b5cff" },
+    { name="Exclusive",   rank=7,  color="#b47cff" },
+    { name="Mythic",      rank=6,  color="#ff4d7d" },
+    { name="Rainbow",     rank=6,  color="#ff5cc8" },
+    { name="Squishy God", rank=6,  color="#cb4bff" },
+    { name="Legendary",   rank=5,  color="#ffa726" },
+    { name="Epic",        rank=4,  color="#c471ff" },
+    { name="Rare",        rank=3,  color="#3b9bff" },
+    { name="Uncommon",    rank=2,  color="#3ddc84" },
+    { name="Celestial",   rank=2,  color="#00dd6b" },
+    { name="SuperRare",   rank=2,  color="#22d3ee" },
+    { name="Common",      rank=1,  color="#9aa3b2" },
+}
+
 local ST = {
     connected  = false,
     servers    = 0, eggsLive = 0,
@@ -80,7 +105,8 @@ local ST = {
     lastHop    = 0, latency = -1,
     eggSeq     = 0,
     cursor     = nil,
-    ladder     = {},
+    ladder     = FALLBACK_LADDER,
+    ladderFrom = "local",
     colors     = {},
     candidates = {},
     diag       = nil,
@@ -90,6 +116,16 @@ local ST = {
 local autoOn = false
 
 local function rc(r) return ST.colors[tostring(r):lower()] or C.mut end
+
+local function applyLadder(rows, from)
+    ST.ladder = rows
+    ST.ladderFrom = from
+    ST.colors = {}
+    for _, r in ipairs(rows) do
+        ST.colors[tostring(r.name):lower()] = hex(r.color)
+    end
+end
+applyLadder(FALLBACK_LADDER, "local")
 
 -- ───────────────────────────────────────────────────────────── persistencia
 local FILE    = "eag_aj_v4.json"
@@ -111,10 +147,22 @@ end
 load()
 
 -- ─────────────────────────────────────────────────────────────────────── http
+-- Se normaliza en CADA peticion, no solo al salir del campo de texto. Una barra
+-- final convertia /api/meta en //api/meta, que el hub servia como fichero: 404.
+local function hubBase()
+    local u = tostring(CFG.HUB or ""):gsub("%s+", "")
+    u = u:gsub("/+$", "")            -- barras finales
+    u = u:gsub("/api$", "")          -- por si pegaste la URL con /api ya puesto
+    if u ~= "" and not u:match("^https?://") then u = "https://" .. u end
+    return u
+end
+
 local function httpJson(method, path, body)
     if not httpreq then return nil, "el executor no tiene request()" end
+    local base = hubBase()
+    if base == "" then return nil, "falta la URL del hub (pestaña AJUSTES)" end
     local opts = {
-        Url = CFG.HUB .. path,
+        Url = base .. path,
         Method = method,
         Headers = { ["Content-Type"] = "application/json", ["x-eag-key"] = CFG.KEY },
     }
@@ -123,6 +171,7 @@ local function httpJson(method, path, body)
     if not ok then return nil, "sin red" end
     local code = res.StatusCode or res.Status or 0
     if code == 401 then return nil, "API key incorrecta" end
+    if code == 404 then return nil, "404 · revisa la URL del hub en AJUSTES" end
     if code < 200 or code >= 300 then return nil, "HTTP " .. tostring(code) end
     local dok, dec = pcall(function() return HS:JSONDecode(res.Body) end)
     if not dok then return nil, "respuesta ilegible" end
@@ -762,6 +811,12 @@ local function toggleRow(parent, x, y, w, text, get, set)
 end
 
 caption(pgFilter, "RAREZAS ACEPTADAS", 2, 0, 200)
+local ladderNote = mk("TextLabel", {
+    Position = UDim2.new(1,-210,0,0), Size = UDim2.new(0,208,0,12),
+    BackgroundTransparency = 1, Font = Enum.Font.GothamMedium, TextSize = 9,
+    TextXAlignment = Enum.TextXAlignment.Right, TextColor3 = C.warn,
+    Text = "", Visible = false,
+}, pgFilter)
 
 local chipHolder = mk("ScrollingFrame", {
     Position = UDim2.new(0,0,0,16), Size = UDim2.new(1,0,0,84),
@@ -788,6 +843,10 @@ local renderChips
 renderChips = function()
     for _, c in ipairs(chipHolder:GetChildren()) do
         if c:IsA("TextButton") then c:Destroy() end
+    end
+    if ladderNote then
+        ladderNote.Visible = (ST.ladderFrom ~= "hub")
+        ladderNote.Text = "lista local · el hub no responde"
     end
     for i, r in ipairs(ST.ladder) do
         local on, col = hasRarity(r.name), rc(r.name)
@@ -972,12 +1031,8 @@ task.spawn(function()
                 if ST.cursor == nil then ST.cursor = ST.eggSeq end
             end
             if type(meta.ladder) == "table" and #meta.ladder > 0 then
-                local changed = (#meta.ladder ~= #ST.ladder)
-                ST.ladder = meta.ladder
-                ST.colors = {}
-                for _, r in ipairs(meta.ladder) do
-                    ST.colors[tostring(r.name):lower()] = hex(r.color)
-                end
+                local changed = (ST.ladderFrom ~= "hub") or (#meta.ladder ~= #ST.ladder)
+                applyLadder(meta.ladder, "hub")
                 if changed then pcall(renderChips) end
             end
         else
