@@ -20,7 +20,7 @@ ESP v8  ──POST /api/report──▶  HUB  ──POST /api/claim──▶  AJ
 | `lib/rarity.js` | La escalera de rarezas real del juego (Common → Titan) |
 | `public/index.html` · `app.js` · `styles.css` | Dashboard |
 | `scripts/ESP_v9.lua` | Reporter: **un escaneo, un reporte**, solo huevos de zona |
-| `scripts/AJ_v4.lua` | Auto joiner: solo hallazgos **nuevos**, y te dice por qué si no salta |
+| `scripts/AJ_v5.lua` | Auto joiner **SAE**: interfaz nueva, móvil y PC |
 | `Dockerfile` · `railway.json` | Despliegue |
 
 ## Deploy en Railway
@@ -43,6 +43,57 @@ API_KEY=test node server.js   # http://localhost:3000
 
 En el **ESP** (tab HUB) y en el **AJ** (tab engranaje), pon la misma
 `HUB_URL` y la misma `API_KEY`.
+
+---
+
+## SAE · el auto joiner v5
+
+Rebautizado a **SAE** en todo lo que se ve —panel del AJ, panel del reporter,
+dashboard—. Los identificadores internos (`x-eag-key`, nombres de fichero del
+hub) no se tocan, así que nada de lo que ya tengas desplegado se rompe.
+
+### Los hallazgos viejos ahora se ven
+
+Antes el filtro de edad los escondía del todo. Ahora la **lista los enseña**,
+marcados con una etiqueta *viejo* y atenuados, y el título dice «2 frescos de 4».
+El salto automático sigue sin ir a por ellos, pero puedes unirte tú a mano con ▶.
+
+Lo hace un solo cambio: la lista pide el feed sin `maxAgeSec`, y el claim lo
+sigue mandando.
+
+### Banner al saltar
+
+Al unirse aparece **UNIENDOSE A · [huevo]** con el color de su rareza y una barra
+que se vacía mientras dura el teleport. Vive fuera del panel, así que se ve
+aunque lo tengas cerrado.
+
+### IN THE SERVER
+
+Al aterrizar, la GUI enseña por qué huevo viniste. El dato viaja en el fichero
+de traspaso (`sae_aj_pending.json`), que ahora guarda el huevo entero y no solo
+el jobId, así que sobrevive al teleport.
+
+### Interfaz y movil
+
+- Pestañas con indicador deslizante, tarjetas con profundidad y degradados.
+- Pulsaciones con rebote, filas que entran escalonadas, destello del color de la
+  rareza cuando aparece un hallazgo nuevo, latido en el punto de conexión.
+- La animación de entrada solo corre para lo que es nuevo de verdad: la lista se
+  repinta cada 4 s y si no, entraba en cascada todo el rato.
+- El panel se escala solo al viewport, así que cabe en cualquier pantalla, y en
+  móvil hay un **botón flotante arrastrable** porque ahí no existe Right Control.
+
+Comprobado que las etiquetas de una fila nunca se pisan, en las cuatro
+combinaciones:
+
+```
+normal          kg[384..456] copy[464..488] join[493..519]
+viejo           viejo[330..378] kg[384..456] …
+en uso          en uso[332..378] kg[384..456] …
+viejo + en uso  en uso[278..324] viejo[330..378] kg[384..456] …
+```
+
+Los ajustes del v4 se importan solos: conserva URL, key y rarezas.
 
 ---
 

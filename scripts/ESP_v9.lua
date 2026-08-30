@@ -1,5 +1,5 @@
 --[[
-    JF · EGG REPORTER v9
+    SAE · EGG REPORTER v9
     F7 = labels    F8 = panel
 
     Cambio de fondo frente al v8: el envio ya NO es un goteo continuo.
@@ -633,7 +633,7 @@ local function buildEmbed(e)
                 { name = "Unirse",    value = string.format("```js\nRoblox.GameLauncher.joinGameInstance(%d, \"%s\")\n```", game.PlaceId, jobId), inline = false },
                 { name = "Jugadores", value = string.format("`%d / %d`", #Players:GetPlayers(), Players.MaxPlayers), inline = true },
             },
-            footer    = { text = "EAG By joszz  ·  zona" },
+            footer    = { text = "SAE By joszz  ·  zona" },
             timestamp = DateTime.now():ToIsoDate(),
         }},
     })
@@ -1017,7 +1017,7 @@ do
         Position = UDim2.new(0,41,0,6), Size = UDim2.new(0,200,0,14),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 12.5,
         TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = C.txt,
-        Text = "JF · EGG REPORTER",
+        Text = "SAE · EGG REPORTER",
     }, head)
     new("TextLabel", {
         Position = UDim2.new(0,41,0,21), Size = UDim2.new(0,240,0,12),
@@ -1326,7 +1326,7 @@ do
         if set and pcall(set, plain) then
             copyBtn.Text = "COPIADO ✓"
         else
-            print("[EAG DIAG]\n" .. plain)
+            print("[SAE DIAG]\n" .. plain)
             copyBtn.Text = "EN LA CONSOLA (F9)"
         end
         task.delay(2, function() copyBtn.Text = "COPIAR DIAGNOSTICO" end)
