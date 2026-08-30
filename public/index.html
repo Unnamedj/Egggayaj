@@ -10,85 +10,109 @@
 <body>
 
 <div id="gate" class="gate">
-  <div class="gate-card">
-    <div class="logo">EAG<span>HUB</span></div>
-    <p class="muted">Introduce la API key del hub para conectarte al feed en vivo.</p>
-    <input id="gateKey" type="password" placeholder="API key" autocomplete="off" />
-    <button id="gateBtn">Conectar</button>
-    <div id="gateErr" class="err"></div>
-  </div>
+  <form class="gate-card" id="gateForm">
+    <div class="brand"><span class="brand-mark"></span>EAG<b>HUB</b></div>
+    <p>Introduce la API key para abrir el feed en vivo.</p>
+    <input id="gateKey" type="password" placeholder="API key" autocomplete="off" spellcheck="false" />
+    <button id="gateBtn" type="submit">Conectar</button>
+    <div id="gateErr" class="gate-err"></div>
+  </form>
 </div>
 
-<header class="topbar">
-  <div class="logo">EAG<span>HUB</span></div>
-  <div class="pill" id="connPill"><i class="dot"></i><span>conectando…</span></div>
-  <div class="spacer"></div>
-  <div class="kpis">
-    <div class="kpi"><b id="kServers">0</b><span>servers</span></div>
-    <div class="kpi"><b id="kEggs">0</b><span>huevos</span></div>
-    <div class="kpi"><b id="kMatch">0</b><span>match</span></div>
-    <div class="kpi"><b id="kClaims">0</b><span>claims</span></div>
-    <div class="kpi"><b id="kRate">0</b><span>/min</span></div>
+<header class="top">
+  <div class="brand"><span class="brand-mark"></span>EAG<b>HUB</b></div>
+
+  <div class="status" id="conn"><i></i><span>conectando</span></div>
+
+  <div class="stats">
+    <div class="stat"><b id="kServers">—</b><span>servers</span></div>
+    <div class="stat"><b id="kEggs">—</b><span>huevos</span></div>
+    <div class="stat"><b id="kMatch">—</b><span>match</span></div>
+    <div class="stat"><b id="kClaims">—</b><span>claims</span></div>
+    <div class="stat"><b id="kRate">—</b><span>/min</span></div>
+    <div class="stat"><b id="kLast">—</b><span>último</span></div>
   </div>
-  <button class="ghost" id="btnLogout" title="Cambiar key">⎋</button>
+
+  <button class="icon-btn" id="btnLogout" title="Cambiar API key" aria-label="Cambiar API key">
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+      <path d="M12 6V4.5A1.5 1.5 0 0 0 10.5 3h-5A1.5 1.5 0 0 0 4 4.5v11A1.5 1.5 0 0 0 5.5 17h5a1.5 1.5 0 0 0 1.5-1.5V14"/>
+      <path d="M9 10h8m0 0-2.5-2.5M17 10l-2.5 2.5"/>
+    </svg>
+  </button>
 </header>
 
 <main>
-  <aside class="panel filters">
-    <h3>Filtros</h3>
-    <div class="field">
-      <label>Rarezas</label>
-      <div id="rarityChips" class="chips"></div>
-    </div>
-    <div class="field row">
-      <div>
-        <label>Kg mínimo</label>
-        <input id="minKg" type="number" min="0" step="1" value="0" />
+  <!-- ───────────────────────────────────────────────────────── filtros -->
+  <aside class="side">
+    <section class="card">
+      <h3>Rarezas</h3>
+      <div id="chips" class="chips"></div>
+      <div class="chip-actions">
+        <button class="link" data-pick="all">todas</button>
+        <button class="link" data-pick="none">ninguna</button>
+        <button class="link" data-pick="top">solo raras</button>
       </div>
-      <div>
-        <label>Kg máximo</label>
-        <input id="maxKg" type="number" min="0" step="1" placeholder="∞" />
+    </section>
+
+    <section class="card">
+      <h3>Peso y edad</h3>
+      <div class="grid2">
+        <label class="fld"><span>Kg mín</span><input id="minKg" type="number" min="0" step="1" placeholder="0" /></label>
+        <label class="fld"><span>Kg máx</span><input id="maxKg" type="number" min="0" step="1" placeholder="∞" /></label>
       </div>
-    </div>
-    <div class="field">
-      <label>Buscar especie</label>
-      <input id="search" type="text" placeholder="ej. Salamander" />
-    </div>
-    <label class="check"><input id="onlyFree" type="checkbox" /> Solo sin claim</label>
-    <label class="check"><input id="autoScroll" type="checkbox" checked /> Auto refresh</label>
+      <label class="fld"><span>Antigüedad máxima</span>
+        <select id="maxAge">
+          <option value="">sin límite</option>
+          <option value="60">1 minuto</option>
+          <option value="300">5 minutos</option>
+          <option value="900">15 minutos</option>
+          <option value="3600">1 hora</option>
+        </select>
+      </label>
+      <label class="fld"><span>Buscar</span>
+        <input id="search" type="text" placeholder="especie, pet o job id" spellcheck="false" />
+      </label>
+      <label class="check"><input id="onlyFree" type="checkbox" /><span>Solo sin claim</span></label>
+      <label class="check"><input id="onlySlot" type="checkbox" /><span>Solo con hueco libre</span></label>
+      <label class="check"><input id="live" type="checkbox" checked /><span>Actualización en vivo</span></label>
+    </section>
 
-    <div class="divider"></div>
-    <h3>Distribución</h3>
-    <div id="dist" class="dist"></div>
+    <section class="card">
+      <h3>Distribución</h3>
+      <div id="dist" class="dist"><span class="dim">sin datos aún</span></div>
+    </section>
 
-    <div class="divider"></div>
-    <h3>Endpoint AJ</h3>
-    <code id="ajUrl" class="code"></code>
-    <button class="ghost wide" id="btnCopy">Copiar URL base</button>
+    <section class="card">
+      <h3>Endpoint</h3>
+      <code id="baseUrl" class="code">—</code>
+      <button class="btn ghost full" id="btnCopy">Copiar URL base</button>
+    </section>
   </aside>
 
-  <section class="panel feed">
-    <div class="feed-head">
-      <h3>Feed en vivo</h3>
-      <div class="tabs">
-        <button class="tab active" data-tab="eggs">Huevos</button>
-        <button class="tab" data-tab="servers">Servers</button>
-      </div>
-    </div>
+  <!-- ───────────────────────────────────────────────────────── contenido -->
+  <section class="card pane">
+    <nav class="tabs">
+      <button class="tab active" data-tab="eggs">Huevos <b id="tEggs">0</b></button>
+      <button class="tab" data-tab="servers">Servers <b id="tServers">0</b></button>
+      <button class="tab" data-tab="feed">Actividad</button>
+    </nav>
 
     <div id="tab-eggs" class="tab-body">
-      <div class="table-head">
-        <span>Huevo</span><span>Rareza</span><span>Peso</span><span>Server</span><span>Edad</span><span style="text-align:right">Acciones</span>
+      <div class="thead eggs">
+        <span>Huevo</span><span>Rareza</span><span class="num">Peso</span><span>Server</span><span>Visto</span><span></span>
       </div>
-      <div id="rows" class="rows"></div>
-      <div id="empty" class="empty">Sin huevos que coincidan con los filtros.</div>
+      <div id="eggRows" class="rows"></div>
+      <div id="eggEmpty" class="empty">Sin huevos que coincidan con los filtros.</div>
     </div>
 
     <div id="tab-servers" class="tab-body hidden">
-      <div class="table-head srv">
-        <span>Job ID</span><span>Jugadores</span><span>Huevos</span><span>Últ. reporte</span><span>Estado</span>
-      </div>
-      <div id="srows" class="rows"></div>
+      <div id="srvRows" class="rows cards"></div>
+      <div id="srvEmpty" class="empty">Ningún server reportando ahora mismo.</div>
+    </div>
+
+    <div id="tab-feed" class="tab-body hidden">
+      <div id="feedRows" class="rows feed"></div>
+      <div id="feedEmpty" class="empty">Sin actividad todavía.</div>
     </div>
   </section>
 </main>

@@ -105,11 +105,34 @@ function filterFromQuery(q) {
     species: parseList(q.get("species")),
     minKg: num(q.get("minKg")),
     maxKg: num(q.get("maxKg")),
+    minRank: num(q.get("minRank")),
     since: num(q.get("since")),
+    sinceSeq: num(q.get("sinceSeq")),
+    maxAgeMs: num(q.get("maxAgeSec")) != null ? num(q.get("maxAgeSec")) * 1000 : null,
+    maxPlayers: num(q.get("maxPlayers")),
     jobId: (q.get("jobId") || "").trim() || null,
     excludeJobIds: parseListRaw(q.get("exclude")),
     hasSlot: /^(1|true)$/i.test(q.get("hasSlot") || ""),
+    newestFirst: /^(1|true)$/i.test(q.get("newest") || ""),
   };
+}
+
+// Los mismos filtros pero llegando por el cuerpo de un POST (lo que manda el AJ).
+function applyBodyFilter(filter, body) {
+  if (!body) return filter;
+  if (body.rarities) filter.rarities = parseList([].concat(body.rarities).join(","));
+  if (body.species) filter.species = parseList([].concat(body.species).join(","));
+  if (body.exclude) filter.excludeJobIds = parseListRaw([].concat(body.exclude).join(","));
+  if (body.minKg != null) filter.minKg = Number(body.minKg);
+  if (body.maxKg != null) filter.maxKg = Number(body.maxKg);
+  if (body.minRank != null) filter.minRank = Number(body.minRank);
+  if (body.since != null) filter.since = Number(body.since);
+  if (body.sinceSeq != null) filter.sinceSeq = Number(body.sinceSeq);
+  if (body.maxAgeSec != null) filter.maxAgeMs = Number(body.maxAgeSec) * 1000;
+  if (body.maxPlayers != null) filter.maxPlayers = Number(body.maxPlayers);
+  if (body.hasSlot != null) filter.hasSlot = !!body.hasSlot;
+  if (body.jobId) filter.jobId = String(body.jobId);
+  return filter;
 }
 
 function parseListRaw(v) {
@@ -145,7 +168,7 @@ function serveStatic(req, res, pathname) {
 }
 
 // ---------------------------------------------------------------- long poll
-const WAKE_ON = { eggs: 1, release: 1, purge: 1 };
+const WAKE_ON = { eggs: 1, egg: 1, release: 1, purge: 1, gone: 1 };
 
 function waitForChange(req, ms) {
   return new Promise((resolve) => {
@@ -243,49 +266,41 @@ const server = http.createServer(async (req, res) => {
 
       if (waitSec > 0) {
         const deadline = Date.now() + waitSec * 1000;
+        // El cursor (since / sinceSeq) se respeta tambien aqui: si el cliente
+        // pidio "solo lo nuevo", esperar no debe devolverle el historico.
         while (store.match(f).length === 0 && Date.now() < deadline) {
           const changed = await waitForChange(req, deadline - Date.now());
           if (!changed) break;
         }
-        f.since = null;
       }
 
       const rows = store.match(f);
       return send(res, 200, {
         ok: true,
         now: Date.now(),
+        eggSeq: store._eggSeq,
         total: rows.length,
         eggs: rows.slice(0, limit),
       });
     }
 
     if (p === "/api/servers" && req.method === "GET") {
-      store.prune();
-      const now = Date.now();
-      const rows = [...store.servers.values()].map((s) => ({
-        jobId: s.jobId,
-        placeId: s.placeId,
-        players: s.players,
-        maxPlayers: s.maxPlayers,
-        eggs: s.eggs.size,
-        reporter: s.reporter,
-        firstSeen: s.firstSeen,
-        updatedAt: s.updatedAt,
-        staleMs: now - s.updatedAt,
-        claimed: store.claims.has(s.jobId),
-      }));
-      rows.sort((a, b) => b.updatedAt - a.updatedAt);
-      return send(res, 200, { ok: true, total: rows.length, servers: rows });
+      const rows = store.serverRows();
+      return send(res, 200, { ok: true, now: Date.now(), total: rows.length, servers: rows });
+    }
+
+    if (p === "/api/events" && req.method === "GET") {
+      const rows = store.feedEvents({
+        limit: num(q.get("limit")) || 80,
+        sinceSeq: num(q.get("sinceSeq")),
+        kinds: parseListRaw(q.get("kinds")),
+      });
+      return send(res, 200, { ok: true, now: Date.now(), seq: store._seq, events: rows });
     }
 
     if (p === "/api/claim" && (req.method === "POST" || req.method === "GET")) {
       const body = req.method === "POST" ? await readBody(req) : {};
-      const filter = filterFromQuery(q);
-      if (body.rarities) filter.rarities = parseList([].concat(body.rarities).join(","));
-      if (body.minKg != null) filter.minKg = Number(body.minKg);
-      if (body.maxKg != null) filter.maxKg = Number(body.maxKg);
-      if (body.exclude) filter.excludeJobIds = parseListRaw([].concat(body.exclude).join(","));
-      if (body.hasSlot != null) filter.hasSlot = !!body.hasSlot;
+      const filter = applyBodyFilter(filterFromQuery(q), body);
 
       const client = (body.client || q.get("client") || "anon").toString().slice(0, 64);
       const waitSec = waitSecondsOf(q, body);
@@ -300,10 +315,14 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
-      if (!result) return send(res, 200, { ok: true, found: false });
+      if (!result) {
+        return send(res, 200, { ok: true, found: false, now: Date.now(), eggSeq: store._eggSeq });
+      }
       return send(res, 200, {
         ok: true,
         found: true,
+        now: Date.now(),
+        eggSeq: store._eggSeq,
         target: result.target,
         eggs: result.eggs,
         expiresAt: result.expiresAt,
