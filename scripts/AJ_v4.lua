@@ -31,8 +31,11 @@ local CFG = {
     RARITIES   = { "Legendary", "Mythic", "Cosmic", "Secret", "Exotic",
                    "Eternal", "Divine", "Titan" },
     HAS_SLOT   = true,
-    ONLY_NEW   = true,
+    -- El corte por defecto para no ir a hallazgos viejos es MAX_AGE, no el
+    -- cursor. Ver la nota larga sobre por que, mas abajo en filterBody().
+    ONLY_NEW   = false,
     SCRIPT_URL = "",
+    _schema    = 2,
 }
 
 -- ───────────────────────────────────────────────────────────────── servicios
@@ -136,13 +139,25 @@ local function save()
     if not canFile then return end
     pcall(function() writefile(FILE, HS:JSONEncode(CFG)) end)
 end
+local migrated = false
 local function load()
     if not canFile or not isfile(FILE) then return end
     pcall(function()
-        for k, v in pairs(HS:JSONDecode(readfile(FILE))) do
+        local d = HS:JSONDecode(readfile(FILE))
+        local schema = tonumber(d._schema) or 1
+        for k, v in pairs(d) do
             if CFG[k] ~= nil then CFG[k] = v end
         end
+        -- Los ajustes guardados con la version anterior traen ONLY_NEW=true,
+        -- que con el reporter de un solo disparo deja al AJ sin objetivos para
+        -- siempre. Se apaga una sola vez; la URL y la key se conservan.
+        if schema < 2 then
+            CFG.ONLY_NEW = false
+            CFG._schema = 2
+            migrated = true
+        end
     end)
+    if migrated then save() end
 end
 load()
 
@@ -191,7 +206,16 @@ local function filterBody()
     -- saber si querias "todas" o "ninguna".
     if #CFG.RARITIES > 0 then b.rarities = CFG.RARITIES end
     if (tonumber(CFG.MAX_KG) or 0) > 0 then b.maxKg = CFG.MAX_KG end
+
+    -- Asi se evitan los hallazgos viejos: por EDAD. Un huevo descubierto hace
+    -- mas de MAX_AGE segundos ya no vale, lo reportara quien sea y cuando sea.
     if (tonumber(CFG.MAX_AGE) or 0) > 0 then b.maxAgeSec = CFG.MAX_AGE end
+
+    -- El cursor (sinceSeq) es OTRA cosa y va apagado por defecto: descarta todo
+    -- lo que el hub ya conocia al encender el auto join. Suena parecido, pero
+    -- con el reporter mandando UN reporte por server, si el reporter paso por
+    -- ahi antes de que encendieras el AJ esos huevos quedan detras del cursor
+    -- y nadie los vuelve a reportar: el AJ se queda esperando eternamente.
     if CFG.ONLY_NEW and ST.cursor then b.sinceSeq = ST.cursor end
     if game.JobId ~= "" then b.exclude = { game.JobId } end
     return b
@@ -899,7 +923,7 @@ field(pgFilter, "KG MAXIMO · 0 = libre", 128, 156, 158, CFG.MAX_KG, function(v)
 field(pgFilter, "EDAD MAX (s)", 296, 156, 110, CFG.MAX_AGE, function(v) CFG.MAX_AGE = math.max(0, tonumber(v) or 0) end)
 
 caption(pgFilter, "REGLAS", 2, 204, 200)
-toggleRow(pgFilter, 0, 220, 244, "solo hallazgos nuevos",
+toggleRow(pgFilter, 0, 220, 244, "ignorar lo que ya habia al encender",
     function() return CFG.ONLY_NEW end,
     function(v) CFG.ONLY_NEW = v; if v then ST.cursor = ST.eggSeq end end)
 toggleRow(pgFilter, 252, 220, 244, "solo servers con hueco",
@@ -907,11 +931,14 @@ toggleRow(pgFilter, 252, 220, 244, "solo servers con hueco",
     function(v) CFG.HAS_SLOT = v end)
 
 mk("TextLabel", {
-    Position = UDim2.new(0,2,0,256), Size = UDim2.new(1,-4,0,34),
+    Position = UDim2.new(0,2,0,256), Size = UDim2.new(1,-4,0,44),
     BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10,
     TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
     TextColor3 = C.mut, TextWrapped = true,
-    Text = "\"Solo hallazgos nuevos\" descarta lo que el hub ya conocia al encender el auto join: es lo que evita aterrizar donde el huevo ya se lo llevaron.",
+    Text = "Lo que evita los hallazgos viejos es EDAD MAX, no la casilla. "
+        .. "Enciendela solo si quieres descartar ademas todo lo que el hub ya "
+        .. "conocia: si el reporter paso por un server antes que tu, esos "
+        .. "huevos no volveran a aparecer y el AJ puede quedarse sin nada.",
 }, pgFilter)
 
 -- ══════════════════════════════════════════════════════════════════════ AJUSTES

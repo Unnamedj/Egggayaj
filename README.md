@@ -46,6 +46,59 @@ En el **ESP** (tab HUB) y en el **AJ** (tab engranaje), pon la misma
 
 ---
 
+## Los hallazgos no llegaban al AJ
+
+Fallo de diseño mío: junté dos cambios que por separado están bien y juntos se
+matan.
+
+- El **cursor** del AJ descarta todo lo que el hub ya conocía al encender el
+  auto join.
+- El **reporter de un solo disparo** manda un reporte por server y no vuelve.
+
+En el orden normal —montas el reporter, luego abres el AJ— los huevos quedan
+detrás del cursor y **nadie los vuelve a reportar nunca**. Inanición garantizada:
+
+```
+CASO A · el AJ ya estaba encendido antes de que el ESP reportara
+  AJ pide claim: SALTA a Salamander Egg
+
+CASO B · el ESP reportó primero y luego abres el AJ  (lo normal)
+  AJ pide claim: NADA   <-- y como el ESP ya no reporta más, nunca saltará
+```
+
+El error de concepto: **«viejo» debe significar viejo en el tiempo**, no
+«anterior a que pulsaras el botón». `EDAD MAX` ya hacía exactamente lo que
+pediste, y no tiene ese problema porque no depende del orden en que arrancas
+las cosas.
+
+Así que el cursor pasa a estar **apagado por defecto** y la frescura la decide
+la edad:
+
+```
+maxAgeSec=2  con un huevo de 3s -> NADA   ✓ descarta lo viejo
+maxAgeSec=60 con el mismo huevo -> SALTA  ✓
+```
+
+Los ajustes ya guardados traen `ONLY_NEW=true`, así que se migran una sola vez
+(`_schema`); la URL, la key y las rarezas se conservan. La casilla sigue ahí,
+renombrada a *«ignorar lo que ya había al encender»*, que es lo que de verdad
+hace.
+
+### Y un latido para que los hallazgos no se evaporen
+
+El hub olvida un server que lleva `SERVER_TTL_SEC` sin dar señales (8 min). Con
+un reporte de un solo disparo, el hallazgo desaparecía solo aunque el huevo
+siguiera ahí. El reporter ahora reenvía el **mismo** payload cada 2 minutos:
+mismos uid, así que no crea huevos, no cambia rarezas y no reinicia la edad.
+
+```
+1er latido: {"stored":1,"fresh":0,"removed":0}
+2do latido: {"stored":1,"fresh":0,"removed":0}
+edad del huevo tras 2 latidos: 133ms  (sigue contando desde el hallazgo real)
+```
+
+---
+
 ## `hub: HTTP 404` y la lista de rarezas vacía
 
 Dos síntomas, una causa y un fallo de diseño encima.

@@ -59,6 +59,7 @@ local CFG = {
     SCAN_STABLE    = 3,     -- pasadas identicas seguidas para dar por bueno
     SCAN_TIMEOUT   = 22,    -- s como mucho esperando a que se estabilice
     SCAN_MINWAIT   = 3,     -- s minimos antes de aceptar un resultado vacio
+    HEARTBEAT      = 120,   -- s entre latidos que mantienen vivo el reporte
 
     -- auto hop
     HOP_AFTER_SEND = true,
@@ -599,6 +600,10 @@ end)
 
 -- Un reporte, con full=true: el hub se queda exactamente con esto para este
 -- server y tira cualquier cosa anterior.
+-- Lo ultimo que se mando bien, ya convertido a payload plano: el latido lo
+-- reenvia sin volver a tocar los modelos del juego.
+local LAST = { payload = nil, jobId = nil, at = 0 }
+
 local function sendReport(eggs)
     if not HUB.enabled or HUB.url == "" then
         HUB.status = "hub apagado o sin URL"
@@ -623,11 +628,41 @@ local function sendReport(eggs)
     if ok then
         HUB.count = HUB.count + #payload
         HUB.status = string.format("%d huevos · %dms · %s", #payload, HUB.lastMs, os.date("%H:%M:%S"))
+        LAST.payload = payload
+        LAST.jobId = game.JobId
+        LAST.at = os.time()
     else
         HUB.status = "error: " .. tostring(err)
     end
     return ok, err
 end
+
+-- Latido. El hub olvida un server que lleva SERVER_TTL_SEC sin dar señales
+-- (8 min por defecto), asi que un reporte de un solo disparo se evaporaba y el
+-- hallazgo desaparecia aunque el huevo siguiera ahi. Reenvia EXACTAMENTE lo
+-- mismo: los uid ya son conocidos, asi que no crea huevos nuevos, no cambia
+-- ninguna rareza y no dispara eventos en el AJ. Solo dice "sigo aqui".
+task.spawn(function()
+    while true do
+        task.wait(CFG.HEARTBEAT)
+        if HUB.enabled and LAST.payload and LAST.jobId == game.JobId and not HOP.busy then
+            local body = HttpService:JSONEncode({
+                jobId      = game.JobId ~= "" and game.JobId or "studio",
+                placeId    = tostring(game.PlaceId),
+                players    = #Players:GetPlayers(),
+                maxPlayers = Players.MaxPlayers,
+                reporter   = LocalPlayer.Name,
+                full       = true,
+                eggs       = LAST.payload,
+            })
+            local ok = httpPost(hubBase() .. "/api/report", body, { ["x-eag-key"] = HUB.key })
+            if ok then
+                HUB.status = string.format("%d huevos · latido %s",
+                    #LAST.payload, os.date("%H:%M:%S"))
+            end
+        end
+    end
+end)
 
 local function sendWebhook(eggs)
     if not WH.enabled or WH.url == "" then return end
