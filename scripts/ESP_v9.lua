@@ -76,12 +76,16 @@ local CFG = {
     -- Auto hop is always on: reporting one server and stopping there is not
     -- useful, so there is no switch for it.
     HOP_MAXPLAYERS = 2,     -- preferred population; widened if nothing is found
-    HOP_PAGES      = 8,     -- pages of 100 per shallow sweep
-    HOP_PAGES_DEEP = 24,    -- pages when the shallow sweep came up empty
-    HOP_POOL       = 40,    -- candidates kept per sweep, so we do not rescan
+    HOP_PAGES      = 6,     -- pages per sweep; the API usually ends it sooner
+    HOP_PAGE_GAP   = 0.35,  -- s between pages: bursting gets the sweep throttled
+    HOP_POOL       = 60,    -- candidates kept per sweep, so we do not rescan
     HOP_POOL_TTL   = 300,   -- s before a pooled candidate is considered stale
+    -- Kept at three hours on purpose. Shortening it was tried and measured
+    -- worse: the sweep starts re-targeting servers it has already reported
+    -- instead of moving on (231 distinct servers in two hours against 287).
     VISITED_TTL    = 3 * 3600,
     VISITED_MAX    = 4000,  -- hard cap so the list cannot grow without bound
+    CURSOR_TTL     = 600,   -- s a saved sweep cursor is still worth resuming
     HOP_RETRY      = 4,     -- s before retrying a failed hop (backs off)
     HOP_RETRY_MAX  = 60,
     HOP_STUCK      = 20,
@@ -376,8 +380,12 @@ local function baked(v) return (not v:match("^__SAE_")) and v or "" end
 local WH  = { url="", enabled=false, rarities={}, count=0, status="idle", queue={} }
 local HUB = { url=baked(HUB_URL_DEFAULT), key=baked(API_KEY_DEFAULT),
               enabled=true, count=0, status="idle", lastMs=0 }
+-- `cursor` is where the last sweep stopped walking the server list. It is
+-- saved to disk because the teleport kills this client: without it every hop
+-- restarted at page 1 and kept re-reading the same first hundred servers, all
+-- of them already visited.
 local HOP = { busy=false, busySince=0, hops=0, fails=0, visited={}, order={},
-               pool={}, poolAt=0, status="idle" }
+               pool={}, poolAt=0, cursor="", status="idle" }
 
 -- Normalised on every send, not just on focus lost: a trailing slash turned
 -- /api/report into //api/report, which the hub served as a file (404).
@@ -457,14 +465,25 @@ local function forgetOldestVisited()
     return true
 end
 
+-- The file also carries the sweep cursor, because every hop restarts this
+-- script from scratch. Older files hold a bare jobId->time map, so both
+-- shapes are read.
 local function loadVisited()
     pcall(function()
         if type(readfile) ~= "function" or type(isfile) ~= "function" then return end
         if not isfile(CFG.VISITED_FILE) then return end
         local d = HttpService:JSONDecode(readfile(CFG.VISITED_FILE))
+        local seen = d
+        if type(d.visited) == "table" then
+            seen = d.visited
+            if type(d.cursor) == "string" and type(d.cursorAt) == "number"
+               and (os.time() - d.cursorAt) < CFG.CURSOR_TTL then
+                HOP.cursor = d.cursor
+            end
+        end
         local now = os.time()
         local fresh = {}
-        for jobId, at in pairs(d) do
+        for jobId, at in pairs(seen) do
             if type(at) == "number" and (now - at) < CFG.VISITED_TTL then
                 fresh[#fresh + 1] = { id = jobId, at = at }
             end
@@ -479,7 +498,11 @@ end
 local function saveVisited()
     pcall(function()
         if type(writefile) ~= "function" then return end
-        writefile(CFG.VISITED_FILE, HttpService:JSONEncode(HOP.visited))
+        writefile(CFG.VISITED_FILE, HttpService:JSONEncode({
+            visited  = HOP.visited,
+            cursor   = HOP.cursor,
+            cursorAt = os.time(),
+        }))
     end)
 end
 loadVisited()
@@ -840,66 +863,123 @@ local function httpGetJson(url)
     return decoded
 end
 
--- One sweep collects SEVERAL candidates at once and they are consumed one by
--- one. Fetching the whole server list on every hop cost ~50 calls per hop
--- against the Roblox API; with the pool it drops to ~1.
-local function collectCandidates(pages, cap, out)
-    local cursor = ""
-    for _ = 1, pages do
-        local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100")
-            :format(game.PlaceId)
-        if cursor ~= "" then url = url .. "&cursor=" .. cursor end
-        local page = httpGetJson(url)
-        if not page or not page.data then break end
+-- Measured against the live endpoint, which changed what this code had to do:
+--
+--   * The walk is SHORT. A mid-sized place returns ~200 servers over 3 pages
+--     and then simply has no nextPageCursor. HOP_PAGES_DEEP = 24 was asking
+--     for pages that do not exist.
+--   * Throttling answers HTTP 200 with {"errors":[...]} and NO `data`. The
+--     old code broke out of the loop on exactly that shape, so being rate
+--     limited was indistinguishable from "this game has no servers left" —
+--     and the four escalating levels each fired more requests into the
+--     throttle, making it worse.
+--   * The visible list churns by roughly ten servers a minute, so re-sweeping
+--     finds new targets. Holding a jobId as visited for three hours did not.
+--   * sortOrder=Desc returns almost the same servers as Asc (196 of 221
+--     overlapped), so walking it backwards buys nothing.
+--   * Cursors are signed, so there is no jumping to a random offset.
+--
+-- Hence: page politely, tell throttling apart from the end of the list, and
+-- carry the cursor across teleports.
+local function fetchPage(cursor)
+    local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100&excludeFullGames=true")
+        :format(game.PlaceId)
+    if cursor and cursor ~= "" then url = url .. "&cursor=" .. cursor end
+    local page = httpGetJson(url)
+    if not page then return nil, "no answer" end
+    if type(page.data) ~= "table" then
+        -- Throttling and a cursor that has gone stale look almost the same:
+        -- both are HTTP 200 with an `errors` array and no `data`. They need
+        -- opposite responses, so tell them apart by what the error says.
+        if type(page.errors) == "table" then
+            for _, e in ipairs(page.errors) do
+                local msg = tostring(e.message or "") .. " " .. tostring(e.field or "")
+                if msg:lower():find("cursor") then return nil, "bad cursor" end
+            end
+            return nil, "throttled"
+        end
+        return nil, "unreadable answer"
+    end
+    return page
+end
+
+-- Returns: how many were added, why it stopped, and where to resume.
+local function collectCandidates(cap, out, startCursor)
+    local cursor, added, stop = startCursor or "", 0, "pages"
+    for i = 1, CFG.HOP_PAGES do
+        if i > 1 then task.wait(CFG.HOP_PAGE_GAP) end
+        local page, err = fetchPage(cursor)
+        if not page and err == "bad cursor" and cursor ~= "" then
+            -- The saved cursor expired. That is not a reason to stop: walk
+            -- from the top of the list instead.
+            cursor = ""
+            page, err = fetchPage("")
+        end
+        if not page then
+            stop = err
+            break
+        end
 
         for _, srv in ipairs(page.data) do
             local playing = tonumber(srv.playing)
             local maxp = tonumber(srv.maxPlayers) or 0
             -- There must be room: teleporting into a full server fails, so
-            -- aiming at one is a wasted hop.
+            -- aiming at one is a wasted hop. excludeFullGames already drops
+            -- them, and this keeps that true if the parameter ever stops
+            -- being honoured.
             local hasRoom = (maxp == 0) or (playing and playing < maxp)
             if playing and hasRoom and srv.id ~= game.JobId and not HOP.visited[srv.id]
                and playing <= cap then
                 out[#out + 1] = { id = srv.id, playing = playing }
-                if #out >= CFG.HOP_POOL then return true end
+                added = added + 1
+                if #out >= CFG.HOP_POOL then return added, "pool full", cursor end
             end
         end
 
         cursor = page.nextPageCursor or ""
-        if cursor == "" then break end
-    end
-    return #out > 0
-end
-
--- Cheapest level first. The player cap is a preference, not a wall: before, as
--- soon as no server with <=2 remained within the first 8 pages, the sweep
--- stopped entirely even with hundreds of valid ones further along.
-local function refillPool()
-    local cap = math.max(1, CFG.HOP_MAXPLAYERS)
-    local levels = {
-        { CFG.HOP_PAGES,      cap,     "near" },
-        { CFG.HOP_PAGES_DEEP, cap,     "deep" },
-        { CFG.HOP_PAGES_DEEP, cap * 3, "wider" },
-        { CFG.HOP_PAGES_DEEP, math.huge, "any free slot" },
-    }
-    for _, L in ipairs(levels) do
-        HOP.pool = {}
-        if collectCandidates(L[1], L[2], HOP.pool) then
-            table.sort(HOP.pool, function(a, b) return a.playing < b.playing end)
-            HOP.poolAt = os.clock()
-            return L[3]
+        if cursor == "" then
+            -- Genuinely the end of the list, not a throttle. Start over next
+            -- time: by then the list has churned.
+            return added, "end of list", ""
         end
     end
-    -- Nothing new at any level: recycle the oldest visited entries.
-    if forgetOldestVisited() then
+    return added, stop, cursor
+end
+
+-- Cheapest level first. The player cap is a preference, not a wall. There are
+-- only two levels now because excludeFullGames removes the servers that used
+-- to justify the others, and because every extra level costs requests at the
+-- exact moment the API may already be throttling.
+local function refillPool()
+    local cap = math.max(1, CFG.HOP_MAXPLAYERS)
+    for _, L in ipairs({ { cap, "near" }, { math.huge, "any free slot" } }) do
         HOP.pool = {}
-        if collectCandidates(CFG.HOP_PAGES, cap, HOP.pool) then
+        local added, stop, cursor = collectCandidates(L[1], HOP.pool, HOP.cursor)
+        HOP.cursor = cursor
+        if stop == "throttled" then
+            -- Escalating now would only add requests to a throttle. Say so,
+            -- so the caller can take the other route instead.
+            return nil, "throttled"
+        end
+        if added > 0 then
+            table.sort(HOP.pool, function(a, b) return a.playing < b.playing end)
+            HOP.poolAt = os.clock()
+            return L[2]
+        end
+    end
+    -- Nothing new anywhere: forget the oldest visited so the sweep cycles
+    -- instead of dying, and restart the walk from the top of the list.
+    if forgetOldestVisited() then
+        HOP.cursor = ""
+        HOP.pool = {}
+        local added = collectCandidates(cap, HOP.pool, "")
+        if added > 0 then
             table.sort(HOP.pool, function(a, b) return a.playing < b.playing end)
             HOP.poolAt = os.clock()
             return "recycled"
         end
     end
-    return nil
+    return nil, "exhausted"
 end
 
 local function findNextServer()
@@ -909,8 +989,8 @@ local function findNextServer()
         local s = table.remove(HOP.pool, 1)
         if not HOP.visited[s.id] and s.id ~= game.JobId then return s end
     end
-    local how = refillPool()
-    if not how then return nil end
+    local how, why = refillPool()
+    if not how then return nil, nil, why end
     return table.remove(HOP.pool, 1), how
 end
 
@@ -931,15 +1011,54 @@ local function scheduleRetry(why)
     task.delay(wait, doHop)
 end
 
+-- Whatever happens next, this client is about to die, so it has to ask to be
+-- run again on arrival. Without this the reporter covers ONE server and the
+-- sweep ends, which is the opposite of what auto hop is for. The URL is
+-- derived from the hub you are already pointing at, so there is nothing extra
+-- to configure.
+local function queueSelf()
+    local qt = queue_on_teleport or (syn and syn.queue_on_teleport)
+    local base = hubBase()
+    if qt and base ~= "" then
+        local loader = ('loadstring(game:HttpGet("%s/script/reporter.lua?key=%s"))()')
+            :format(base, HttpService:UrlEncode(HUB.key))
+        pcall(qt, loader)
+    end
+end
+
+-- The second way of getting a server, used when the list gives nothing.
+-- TeleportService:Teleport asks Roblox's own matchmaker for a server instead
+-- of naming one, so it does not depend on the list, cannot be throttled by it
+-- and cannot run out. It costs control: the matchmaker may well hand back a
+-- server already visited, which is why it is the fallback and not the rule.
+local function hopByMatchmaking(why)
+    rememberVisited(game.JobId)
+    saveVisited()
+    HOP.hops = HOP.hops + 1
+    HOP.status = ("%s · hopping by matchmaking"):format(why or "list empty")
+    queueSelf()
+    local ok, err = pcall(function()
+        TeleportService:Teleport(game.PlaceId, LocalPlayer)
+    end)
+    if ok then
+        HOP.fails = 0
+    else
+        scheduleRetry("matchmaking hop failed: " .. tostring(err))
+    end
+end
+
 doHop = function()
     if HOP.busy then return end
     HOP.busy = true
     HOP.busySince = os.clock()
     HOP.status = "looking for a server…"
 
-    local target, how = findNextServer()
+    local target, how, why = findNextServer()
     if not target then
-        scheduleRetry("no servers left to sweep")
+        -- Being throttled is temporary and asking the matchmaker does not
+        -- touch the API at all, so it is exactly the right move here. Only a
+        -- failure of both ways is worth waiting out.
+        hopByMatchmaking(why == "throttled" and "rate limited" or "no servers left")
         return
     end
 
@@ -951,18 +1070,7 @@ doHop = function()
         tostring(target.id):sub(1, 8), target.playing or 0,
         how and ("  (" .. how .. ")") or "")
 
-    -- The teleport kills this client, so the reporter has to ask to be run
-    -- again on arrival. Without this it reports ONE server and the sweep ends,
-    -- which is the opposite of what auto hop is for.
-    -- The URL is derived from the hub you are already pointing at, so there is
-    -- nothing extra to configure.
-    local qt = queue_on_teleport or (syn and syn.queue_on_teleport)
-    local base = hubBase()
-    if qt and base ~= "" then
-        local loader = ('loadstring(game:HttpGet("%s/script/reporter.lua?key=%s"))()')
-            :format(base, HttpService:UrlEncode(HUB.key))
-        pcall(qt, loader)
-    end
+    queueSelf()
 
     local ok, err = pcall(function()
         TeleportService:TeleportToPlaceInstance(game.PlaceId, target.id, LocalPlayer)
@@ -1388,7 +1496,10 @@ do
     }, pHub)
     corner(forgetBtn, 7); stroke(forgetBtn, C.line, 0.4)
     forgetBtn.MouseButton1Click:Connect(function()
-        HOP.visited = {}; saveVisited(); HOP.status = "visited list cleared"
+        -- Starting over means starting over: the saved cursor points deep
+        -- into the list, which is the wrong place to resume from now.
+        HOP.visited = {}; HOP.order = {}; HOP.pool = {}; HOP.cursor = ""
+        saveVisited(); HOP.status = "visited list cleared"
     end)
 
     hubStatusLbl = new("TextLabel", {

@@ -130,30 +130,71 @@ The teleport kills the client, so the reporter queues itself to run again on
 arrival, loading from `<hub>/script/reporter.lua`. Without that the sweep would
 report exactly one server and end.
 
-The server search used to dead-end. It only looked at the first 8 pages and only
-accepted servers at or below the player cap, so once those were visited it
-returned nothing and retried every 10s forever. Measured against a simulated
-4,000-server game:
+### Finding servers
+
+The old search only knew one way to get a server: walk
+`games.roblox.com/.../servers/Public` from page 1. Measuring that endpoint
+changed most of what this code does.
+
+| What was measured | Result |
+|---|---|
+| How deep the walk goes on a mid-sized place | ~220 servers over **3 pages**, then no `nextPageCursor` |
+| What throttling looks like | HTTP **200** with `{"errors":[…]}` and no `data` |
+| How fast the list churns | about **10 new servers a minute** |
+| `sortOrder=Desc` instead of `Asc` | 196 of 221 servers were the same — not worth a second walk |
+| Forging a cursor to jump to a random offset | rejected, the cursor is signed |
+| A saved cursor reused later | still valid after **10 minutes**, and returned **0** of page 1's servers |
+
+Two of those are why it ran out of servers:
+
+- **A throttle was read as "this game has no servers left."** The code broke
+  out of the page loop on a reply with no `data`, which is exactly what being
+  rate limited returns. It then escalated through four levels — up to 80 more
+  requests — into the throttle that had just started, and concluded there was
+  nothing to hop to.
+- **Every hop restarted at page 1.** The teleport kills the client, so the pool
+  and the cursor died with it. Each new life re-read the same first hundred
+  servers, all of them already visited.
+
+So the cursor is now saved next to the visited list and the sweep resumes where
+it stopped, pages are spaced out instead of bursted, `excludeFullGames=true`
+does the filtering server-side, an expired cursor restarts the walk instead of
+ending it, and a throttle stops the sweep at one request rather than eighty.
+
+### And a second way in, when the list gives nothing
+
+`TeleportService:Teleport` asks Roblox's own matchmaker for a server instead of
+naming one. It does not read the server list, so it cannot be throttled by it
+and cannot run out. It costs control — the matchmaker may hand back a server
+already visited — so it is the fallback, not the rule.
+
+Measured over a simulated two-hour session, against an endpoint that throttles
+and churns the way the real one does:
 
 ```
-                          hops before stalling   API calls per hop
-before                    47                     (then stuck forever)
-after                     2,673                  1.21
+                                         hops  distinct servers  list empty  stalled
+big game, 8% of servers quiet
+  before                                  263        93              20       8 min
+  after                                   271       271               0       0
+big game, 2% quiet
+  before                                  188        24              80      33 min
+  after                                   272       272               0       0
+busy game, 220 servers visible
+  before                                  288       288               0       0
+  after                                   287       287               0       0
+Roblox API barely answering (3 calls/min)
+  before                                   48        11             192      80 min
+  after                                   288       283               0       0   (all via matchmaking)
 ```
 
-Four things changed:
+The last row is the fallback doing its job: 288 hops on 290 API calls, instead
+of 48 hops on 1,199 calls spent arguing with a throttle.
 
-- The player cap is a preference, not a wall. If nothing matches it the search
-  widens, then pages deeper, and only then accepts any server with a free slot.
-- A server with no free slot is never targeted — the teleport would just fail.
-  Of 1,072 full servers in the simulation, zero were picked.
-- One sweep collects up to 40 candidates and consumes them one at a time, so the
-  full server list is not re-fetched on every hop.
-- When nothing new is left at any level, the oldest half of the visited list is
-  released so the sweep cycles instead of dying. The list is also hard-capped at
-  4,000 entries.
+Shortening the visited list's three-hour lifetime was tried and measured
+**worse** — the sweep starts re-reporting servers it has already covered (231
+distinct in two hours instead of 287) — so it stayed at three hours.
 
-Failures now back off (4s → 60s) instead of retrying at a flat 4s forever.
+Failures back off (4s → 60s) instead of retrying at a flat 4s forever.
 
 ### The send is checked, not assumed
 
