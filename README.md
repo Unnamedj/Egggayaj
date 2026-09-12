@@ -78,6 +78,40 @@ If zone models are present and none of them resolve, nothing is sent — an empt
 report. After three such servers in a row it stops hopping: at that point the
 fault is not the server.
 
+### Hopping is always on
+
+There is no switch. Reporting one server and stopping there is not useful, so
+the hop is simply the last step of the cycle.
+
+That makes one setting mandatory: **RAW SCRIPT URL**, under the HUB tab. The
+teleport kills the client, so the reporter has to queue itself to run again on
+arrival. Without it the sweep reports exactly one server and ends.
+
+The server search used to dead-end. It only looked at the first 8 pages and only
+accepted servers at or below the player cap, so once those were visited it
+returned nothing and retried every 10s forever. Measured against a simulated
+4,000-server game:
+
+```
+                          hops before stalling   API calls per hop
+before                    47                     (then stuck forever)
+after                     2,673                  1.21
+```
+
+Four things changed:
+
+- The player cap is a preference, not a wall. If nothing matches it the search
+  widens, then pages deeper, and only then accepts any server with a free slot.
+- A server with no free slot is never targeted — the teleport would just fail.
+  Of 1,072 full servers in the simulation, zero were picked.
+- One sweep collects up to 40 candidates and consumes them one at a time, so the
+  full server list is not re-fetched on every hop.
+- When nothing new is left at any level, the oldest half of the visited list is
+  released so the sweep cycles instead of dying. The list is also hard-capped at
+  4,000 entries.
+
+Failures now back off (4s → 60s) instead of retrying at a flat 4s forever.
+
 A heartbeat resends the identical payload every 2 minutes, because the hub
 forgets a server after `SERVER_TTL_SEC` without a signal. Same uids, so it
 creates no eggs, changes no rarity and does not reset any age.

@@ -62,6 +62,9 @@ local CFG = {
     ZONE_CONTAINER = "AreaEggSlotsClient",
     CONFIG_FILE    = "jf_reporter_v9.json",
     VISITED_FILE   = "jf_esp_visited.json",
+    -- RAW URL of this script. Without it the sweep dies on the first server:
+    -- the teleport kills the client and nothing starts the reporter again.
+    SCRIPT_URL     = "",
 
     -- Wait for the server to load, and THEN a single pass.
     -- No scanning is needed to know it has finished: the egg container fires
@@ -71,12 +74,17 @@ local CFG = {
     READY_TIMEOUT  = 60,    -- s at most waiting for that signal
     HEARTBEAT      = 120,   -- s between heartbeats that keep the report alive
 
-    -- auto hop
-    HOP_AFTER_SEND = true,
-    HOP_MAXPLAYERS = 2,
-    HOP_PAGES      = 8,
+    -- Auto hop is always on: reporting one server and stopping there is not
+    -- useful, so there is no switch for it.
+    HOP_MAXPLAYERS = 2,     -- preferred population; widened if nothing is found
+    HOP_PAGES      = 8,     -- pages of 100 per shallow sweep
+    HOP_PAGES_DEEP = 24,    -- pages when the shallow sweep came up empty
+    HOP_POOL       = 40,    -- candidates kept per sweep, so we do not rescan
+    HOP_POOL_TTL   = 300,   -- s before a pooled candidate is considered stale
     VISITED_TTL    = 3 * 3600,
-    HOP_RETRY      = 4,
+    VISITED_MAX    = 4000,  -- hard cap so the list cannot grow without bound
+    HOP_RETRY      = 4,     -- s before retrying a failed hop (backs off)
+    HOP_RETRY_MAX  = 60,
     HOP_STUCK      = 20,
 }
 
@@ -106,7 +114,7 @@ end
 
 local function req(path)
     local m = nav(ReplicatedStorage, path)
-    if not m then return nil, "no existe" end
+    if not m then return nil, "not found" end
     local ok, v = pcall(require, m)
     if not ok then return nil, "require failed" end
     return v
@@ -359,9 +367,10 @@ end
 ----------------------------------------------------------------------
 -- STATE
 ----------------------------------------------------------------------
-local WH  = { url="", enabled=false, rarities={}, count=0, status="inactivo", queue={} }
-local HUB = { url="", key="", enabled=true, count=0, status="inactivo", lastMs=0 }
-local HOP = { enabled=false, busy=false, busySince=0, hops=0, visited={}, status="inactivo" }
+local WH  = { url="", enabled=false, rarities={}, count=0, status="idle", queue={} }
+local HUB = { url="", key="", enabled=true, count=0, status="idle", lastMs=0 }
+local HOP = { busy=false, busySince=0, hops=0, fails=0, visited={}, order={},
+               pool={}, poolAt=0, status="idle" }
 
 -- Normalised on every send, not just on focus lost: a trailing slash turned
 -- /api/report into //api/report, which the hub served as a file (404).
@@ -393,7 +402,7 @@ local function saveConfig()
         writefile(CFG.CONFIG_FILE, HttpService:JSONEncode({
             url = WH.url, enabled = WH.enabled, rarities = WH.rarities,
             hubUrl = HUB.url, hubKey = HUB.key, hubEnabled = HUB.enabled,
-            hopEnabled = HOP.enabled, hopMax = CFG.HOP_MAXPLAYERS,
+            hopMax = CFG.HOP_MAXPLAYERS, scriptUrl = CFG.SCRIPT_URL,
         }))
     end)
 end
@@ -409,11 +418,37 @@ local function loadConfig()
         HUB.url     = d.hubUrl or ""
         HUB.key     = d.hubKey or ""
         if d.hubEnabled ~= nil then HUB.enabled = d.hubEnabled end
-        HOP.enabled = d.hopEnabled or false
         CFG.HOP_MAXPLAYERS = tonumber(d.hopMax) or CFG.HOP_MAXPLAYERS
+        CFG.SCRIPT_URL = d.scriptUrl or CFG.SCRIPT_URL
     end)
 end
 loadConfig()
+
+-- `visited` maps jobId -> when it was visited, and `order` keeps arrival order
+-- so the oldest can be dropped. Without that list the sweep stalled until the
+-- 3 hour TTL expired.
+local function rememberVisited(jobId)
+    if type(jobId) ~= "string" or jobId == "" then return end
+    if not HOP.visited[jobId] then HOP.order[#HOP.order + 1] = jobId end
+    HOP.visited[jobId] = os.time()
+    -- hard cap: it cannot grow without bound over a long session
+    while #HOP.order > CFG.VISITED_MAX do
+        local oldest = table.remove(HOP.order, 1)
+        HOP.visited[oldest] = nil
+    end
+end
+
+-- When there genuinely is no new server left, forgetting the oldest half lets
+-- the sweep carry on instead of dying there.
+local function forgetOldestVisited()
+    local drop = math.floor(#HOP.order / 2)
+    if drop < 1 then return false end
+    for i = 1, drop do HOP.visited[HOP.order[i]] = nil end
+    local rest = {}
+    for i = drop + 1, #HOP.order do rest[#rest + 1] = HOP.order[i] end
+    HOP.order = rest
+    return true
+end
 
 local function loadVisited()
     pcall(function()
@@ -421,8 +456,16 @@ local function loadVisited()
         if not isfile(CFG.VISITED_FILE) then return end
         local d = HttpService:JSONDecode(readfile(CFG.VISITED_FILE))
         local now = os.time()
+        local fresh = {}
         for jobId, at in pairs(d) do
-            if type(at) == "number" and (now - at) < CFG.VISITED_TTL then HOP.visited[jobId] = at end
+            if type(at) == "number" and (now - at) < CFG.VISITED_TTL then
+                fresh[#fresh + 1] = { id = jobId, at = at }
+            end
+        end
+        table.sort(fresh, function(a, b) return a.at < b.at end)
+        for _, e in ipairs(fresh) do
+            HOP.visited[e.id] = e.at
+            HOP.order[#HOP.order + 1] = e.id
         end
     end)
 end
@@ -749,74 +792,145 @@ local function httpGetJson(url)
     return decoded
 end
 
-local function findNextServer()
-    local best, cursor = nil, ""
-    for _ = 1, CFG.HOP_PAGES do
+-- One sweep collects SEVERAL candidates at once and they are consumed one by
+-- one. Fetching the whole server list on every hop cost ~50 calls per hop
+-- against the Roblox API; with the pool it drops to ~1.
+local function collectCandidates(pages, cap, out)
+    local cursor = ""
+    for _ = 1, pages do
         local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100")
             :format(game.PlaceId)
         if cursor ~= "" then url = url .. "&cursor=" .. cursor end
         local page = httpGetJson(url)
         if not page or not page.data then break end
+
         for _, srv in ipairs(page.data) do
-            local playing = srv.playing
-            if playing and srv.id ~= game.JobId and not HOP.visited[srv.id] then
-                if playing <= CFG.HOP_MAXPLAYERS then
-                    if playing <= 1 then return srv end
-                    if best == nil or playing < best.playing then best = srv end
-                end
+            local playing = tonumber(srv.playing)
+            local maxp = tonumber(srv.maxPlayers) or 0
+            -- There must be room: teleporting into a full server fails, so
+            -- aiming at one is a wasted hop.
+            local hasRoom = (maxp == 0) or (playing and playing < maxp)
+            if playing and hasRoom and srv.id ~= game.JobId and not HOP.visited[srv.id]
+               and playing <= cap then
+                out[#out + 1] = { id = srv.id, playing = playing }
+                if #out >= CFG.HOP_POOL then return true end
             end
         end
+
         cursor = page.nextPageCursor or ""
         if cursor == "" then break end
     end
-    return best
+    return #out > 0
+end
+
+-- Cheapest level first. The player cap is a preference, not a wall: before, as
+-- soon as no server with <=2 remained within the first 8 pages, the sweep
+-- stopped entirely even with hundreds of valid ones further along.
+local function refillPool()
+    local cap = math.max(1, CFG.HOP_MAXPLAYERS)
+    local levels = {
+        { CFG.HOP_PAGES,      cap,     "near" },
+        { CFG.HOP_PAGES_DEEP, cap,     "deep" },
+        { CFG.HOP_PAGES_DEEP, cap * 3, "wider" },
+        { CFG.HOP_PAGES_DEEP, math.huge, "any free slot" },
+    }
+    for _, L in ipairs(levels) do
+        HOP.pool = {}
+        if collectCandidates(L[1], L[2], HOP.pool) then
+            table.sort(HOP.pool, function(a, b) return a.playing < b.playing end)
+            HOP.poolAt = os.clock()
+            return L[3]
+        end
+    end
+    -- Nothing new at any level: recycle the oldest visited entries.
+    if forgetOldestVisited() then
+        HOP.pool = {}
+        if collectCandidates(CFG.HOP_PAGES, cap, HOP.pool) then
+            table.sort(HOP.pool, function(a, b) return a.playing < b.playing end)
+            HOP.poolAt = os.clock()
+            return "recycled"
+        end
+    end
+    return nil
+end
+
+local function findNextServer()
+    -- A candidate pooled a while ago may have filled up: drop it.
+    if os.clock() - HOP.poolAt > CFG.HOP_POOL_TTL then HOP.pool = {} end
+    while #HOP.pool > 0 do
+        local s = table.remove(HOP.pool, 1)
+        if not HOP.visited[s.id] and s.id ~= game.JobId then return s end
+    end
+    local how = refillPool()
+    if not how then return nil end
+    return table.remove(HOP.pool, 1), how
 end
 
 local runScan  -- declared early so doHop can retry the cycle
+local doHop    -- declared early so scheduleRetry can reach it
 
-local function doHop()
+-- Growing backoff between failures. It used to retry every 4s indefinitely,
+-- which hammers the Roblox API exactly when something is already wrong.
+local function retryDelay()
+    return math.min(CFG.HOP_RETRY * math.max(1, HOP.fails), CFG.HOP_RETRY_MAX)
+end
+
+local function scheduleRetry(why)
+    HOP.fails = HOP.fails + 1
+    local wait = retryDelay()
+    HOP.status = ("%s · retrying in %ds"):format(why, wait)
+    HOP.busy = false
+    task.delay(wait, doHop)
+end
+
+doHop = function()
     if HOP.busy then return end
     HOP.busy = true
     HOP.busySince = os.clock()
-    HOP.status = "looking for an empty server…"
+    HOP.status = "looking for a server…"
 
-    local target = findNextServer()
+    local target, how = findNextServer()
     if not target then
-        HOP.status = "no new servers · retrying in 10s"
-        HOP.busy = false
-        task.delay(10, function() if HOP.enabled then doHop() end end)
+        scheduleRetry("no servers left to sweep")
         return
     end
 
-    HOP.visited[target.id] = os.time()
-    if game.JobId ~= "" then HOP.visited[game.JobId] = os.time() end
+    rememberVisited(target.id)
+    rememberVisited(game.JobId)
     saveVisited()
     HOP.hops = HOP.hops + 1
-    HOP.status = ("hopping -> %s · %d players"):format(target.id:sub(1,8), target.playing or 0)
+    HOP.status = ("hopping -> %s · %d players%s"):format(
+        tostring(target.id):sub(1, 8), target.playing or 0,
+        how and ("  (" .. how .. ")") or "")
+
+    -- The teleport kills this client, so the reporter has to ask to be run
+    -- again on arrival. Without this it reports ONE server and the sweep ends,
+    -- which is the opposite of what auto hop is for.
+    local qt = queue_on_teleport or (syn and syn.queue_on_teleport)
+    if qt and CFG.SCRIPT_URL ~= "" then
+        pcall(qt, ('loadstring(game:HttpGet("%s"))()'):format(CFG.SCRIPT_URL))
+    end
 
     local ok, err = pcall(function()
         TeleportService:TeleportToPlaceInstance(game.PlaceId, target.id, LocalPlayer)
     end)
-    if not ok then
-        HOP.status = "hop failed: " .. tostring(err)
-        HOP.busy = false
-        task.delay(CFG.HOP_RETRY, function() if HOP.enabled then doHop() end end)
+    if ok then
+        HOP.fails = 0
+    else
+        scheduleRetry("hop failed: " .. tostring(err))
     end
 end
 
 TeleportService.TeleportInitFailed:Connect(function(_, _, msg)
-    HOP.status = "teleport rejected: " .. tostring(msg)
-    HOP.busy = false
-    task.delay(CFG.HOP_RETRY, function() if HOP.enabled then doHop() end end)
+    scheduleRetry("teleport rejected: " .. tostring(msg))
 end)
 
+-- Watchdog: the teleport was requested but neither happened nor failed.
 task.spawn(function()
     while true do
         task.wait(2)
-        if HOP.enabled and HOP.busy and (os.clock() - HOP.busySince) > CFG.HOP_STUCK then
-            HOP.status = "the hop never happened"
-            HOP.busy = false
-            doHop()
+        if HOP.busy and (os.clock() - HOP.busySince) > CFG.HOP_STUCK then
+            scheduleRetry("the hop never happened")
         end
     end
 end)
@@ -872,7 +986,7 @@ runScan = function(manual)
                 HOP.status = "stopped: " .. SCAN.failStreak .. " servers in a row resolved nothing"
                 return
             end
-            if HOP.enabled and not manual then task.wait(2); doHop() end
+            if not manual then task.wait(2); doHop() end
             return
         end
 
@@ -895,7 +1009,7 @@ runScan = function(manual)
         scanning = false
 
         -- 4. And only now, the hop. Never earlier, and only if the report landed.
-        if ok and HOP.enabled and not manual then
+        if ok and not manual then
             task.wait(1)
             doHop()
         end
@@ -970,7 +1084,7 @@ local function stroke(o, col, tr, th)
     return new("UIStroke", { Color = col or C.line, Transparency = tr or 0, Thickness = th or 1 }, o)
 end
 
-local panel, phaseLbl, detailLbl, phaseDot, listBody, hubStatusLbl, whStatusLbl, hopBtnLbl, rescanLbl
+local panel, phaseLbl, detailLbl, phaseDot, listBody, hubStatusLbl, whStatusLbl, rescanLbl
 local diagBody
 local diagText = ""
 
@@ -1023,7 +1137,7 @@ do
         Position = UDim2.new(0,41,0,21), Size = UDim2.new(0,240,0,12),
         BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10,
         TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = C.mut,
-        Text = "one scan · one report · F7 labels · F8 panel",
+        Text = "scan → report → hop  ·  F7 labels · F8 panel",
     }, head)
 
     local close = new("TextButton", {
@@ -1166,6 +1280,9 @@ do
         function(v) HUB.url = (v:gsub("%s+",""):gsub("/+$","")) end)
     local hubKeyBox = fieldOn(pHub, "API KEY", 50, "the same API_KEY as the hub", HUB.key,
         function(v) HUB.key = (v:gsub("%s+","")) end)
+    fieldOn(pHub, "RAW SCRIPT URL  ·  needed to keep sweeping after each hop", 100,
+        "https://raw.githubusercontent.com/.../ESP_v9.lua", CFG.SCRIPT_URL,
+        function(v) CFG.SCRIPT_URL = (v:gsub("%s+","")) end)
 
     local function toggleOn(parent2, y, get, set, text)
         local b = new("TextButton", {
@@ -1189,21 +1306,12 @@ do
         return b, paint
     end
 
-    toggleOn(pHub, 100, function() return HUB.enabled end,
+    toggleOn(pHub, 150, function() return HUB.enabled end,
         function(v) HUB.enabled = v end, "report to the hub")
 
-    local _, paintHopBtn = toggleOn(pHub, 134, function() return HOP.enabled end,
-        function(v)
-            HOP.enabled = v
-            HOP.status = v and "activo" or "inactivo"
-            -- Turned on with the scan already finished: hop right away.
-            if v and SCAN.phase == "done" and not HOP.busy then task.delay(0.5, doHop) end
-        end,
-        "auto hop: once the report is done, move to the next server")
-    hopBtnLbl = paintHopBtn
 
     local testBtn = new("TextButton", {
-        Position = UDim2.new(0,0,0,172), Size = UDim2.new(0,140,0,28),
+        Position = UDim2.new(0,0,0,186), Size = UDim2.new(0,140,0,28),
         BackgroundColor3 = C.card2, BorderSizePixel = 0, Font = Enum.Font.GothamBold,
         TextSize = 10.5, TextColor3 = C.txt2, Text = "TEST CONNECTION", AutoButtonColor = false,
     }, pHub)
@@ -1224,7 +1332,7 @@ do
     end)
 
     local forgetBtn = new("TextButton", {
-        Position = UDim2.new(0,148,0,172), Size = UDim2.new(0,150,0,28),
+        Position = UDim2.new(0,148,0,186), Size = UDim2.new(0,150,0,28),
         BackgroundColor3 = C.card2, BorderSizePixel = 0, Font = Enum.Font.GothamBold,
         TextSize = 10.5, TextColor3 = C.txt2, Text = "FORGET VISITED", AutoButtonColor = false,
     }, pHub)
