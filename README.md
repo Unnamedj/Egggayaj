@@ -58,7 +58,13 @@ loadstring(game:HttpGet("https://YOUR-HUB.up.railway.app/script/joiner.lua?key=Y
 ```
 
 `/script/` requires the key, like every write path — the copy it hands back
-carries the key in clear, so it must not be world-readable. The repo files hold
+carries the key in clear, so it must not be world-readable.
+
+The Dockerfile has to copy `scripts/`. It did not at first, so the route existed
+and answered 401 without a key but 404 with one: the files simply were not in the
+image. The boot log now prints `scripts served: reporter.lua, joiner.lua`, or
+`NONE — scripts/ missing from the image`, and the 404 body says which of the two
+it is. The repo files hold
 only `__SAE_HUB_URL__` and `__SAE_API_KEY__` placeholders, which is why no real
 key is ever committed.
 

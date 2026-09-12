@@ -16,6 +16,7 @@ const MAX_BODY = Number(process.env.MAX_BODY_BYTES || 1024 * 1024);
 const store = new Store({ serverTtlMs: SERVER_TTL_MS, claimTtlMs: CLAIM_TTL_MS });
 
 const PUBLIC_DIR = path.join(__dirname, "public");
+const SCRIPTS_DIR = path.join(__dirname, "scripts");
 const MIME = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -203,8 +204,21 @@ function serveScript(req, res, name, url) {
   const file = SCRIPTS[name];
   if (!file) return send(res, 404, { error: "unknown script" });
 
-  fs.readFile(path.join(__dirname, "scripts", file), "utf8", (err, src) => {
-    if (err) return send(res, 404, { error: "script not found" });
+  const abs = path.join(SCRIPTS_DIR, file);
+  fs.readFile(abs, "utf8", (err, src) => {
+    if (err) {
+      // A bare 404 here sent us hunting in the wrong place once already: the
+      // Dockerfile was not copying scripts/ at all, so the route existed but
+      // the files did not. Say which it is.
+      return send(res, 404, {
+        error: "script not found",
+        path: abs,
+        scriptsDirPresent: fs.existsSync(SCRIPTS_DIR),
+        hint: fs.existsSync(SCRIPTS_DIR)
+          ? "the directory is there but this file is not"
+          : "scripts/ is missing from the deployment — check the Dockerfile copies it",
+      });
+    }
 
     // Railway terminates TLS, so the scheme comes from the proxy header; with
     // no proxy, ask the socket rather than assuming https and handing back a
@@ -451,6 +465,11 @@ server.listen(PORT, () => {
   console.log(`[EAG HUB] listening on :${PORT}`);
   console.log(`[EAG HUB] key required: ${API_KEY ? "yes" : "NO (open instance)"}`);
   console.log(`[EAG HUB] public read: ${PUBLIC_READ}`);
+  // Surfaced at boot so a deployment missing scripts/ is obvious in the logs
+  // rather than only showing up as a 404 from inside the game.
+  const names = Object.keys(SCRIPTS).filter((n) =>
+    fs.existsSync(path.join(SCRIPTS_DIR, SCRIPTS[n])));
+  console.log(`[EAG HUB] scripts served: ${names.length ? names.join(", ") : "NONE — scripts/ missing from the image"}`);
 });
 
 setInterval(() => store.prune(), 30000).unref();
