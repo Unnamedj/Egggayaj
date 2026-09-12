@@ -68,7 +68,22 @@ local CFG = {
     -- an event whenever a model is added, so waiting for it to go quiet is
     -- enough.
     QUIET          = 2.5,   -- s with no new models = the server has loaded
-    READY_TIMEOUT  = 60,    -- s at most waiting for that signal
+    READY_TIMEOUT  = 45,    -- s at most waiting for that signal, per attempt
+    -- The zone container and the game's own records can both arrive late, and
+    -- one timeout used to end this client's life on the server: it stopped,
+    -- never hopped, and RESCAN could not revive it. Everything below exists so
+    -- the cycle always ends in another try or a hop, never in sitting still.
+    READY_TRIES    = 2,     -- whole waits before giving up on this server
+    READY_RETRY    = 2,     -- s between them
+    SCAN_TRIES     = 3,     -- rescans while models are there but none resolve
+    SCAN_RETRY     = 2,     -- s between them
+    -- Share of the zone that must resolve before a scan is believed. The zone
+    -- count is exactly eggs + skipped, so this measures how much of the server
+    -- was really read. Three eggs out of 169 models is the game's records
+    -- arriving late, not a server with three eggs — and sending that with
+    -- full=true would tell the hub the other 166 are gone.
+    SCAN_MIN_RATIO = 0.5,
+    SCAN_STUCK     = 240,   -- s before the cycle is declared hung and forced on
     HEARTBEAT      = 120,   -- s between heartbeats that keep the report alive
     SEND_TRIES     = 3,     -- a dropped report used to lose the whole server
     SEND_RETRY     = 2,     -- s before retrying, multiplied by the attempt
@@ -1100,82 +1115,142 @@ end)
 -- THE CYCLE: wait -> one scan -> send once -> hop
 ----------------------------------------------------------------------
 local scanning = false
+local scanStartedAt = 0
+
+-- One full cycle: wait, scan, send. It records everything in SCAN and never
+-- hops — the caller does that exactly once, whatever happened here, so there is
+-- a single place where "what do we do next" is decided.
+-- Returns true when a report actually landed.
+local function scanCycle()
+    SCAN.phase, SCAN.passes = "waiting", 0
+
+    -- 1. Wait for the server. Retried, because a container that has not shown
+    --    up yet is not the same as one that never will, and the old code could
+    --    not tell the difference.
+    local zoneFolder, warn
+    for attempt = 1, CFG.READY_TRIES do
+        zoneFolder, warn = waitForServer()
+        if zoneFolder then break end
+        SCAN.detail = ("%s · attempt %d of %d"):format(tostring(warn), attempt, CFG.READY_TRIES)
+        if attempt < CFG.READY_TRIES then task.wait(CFG.READY_RETRY) end
+    end
+    if not zoneFolder then
+        SCAN.phase = "error"
+        SCAN.detail = ("%s after %d attempts · moving to another server")
+            :format(tostring(warn), CFG.READY_TRIES)
+        SCAN.doneAt = os.time()
+        SCAN.sent = 0
+        return false
+    end
+
+    -- 2. Scan. Retried while the zone holds models but nothing resolves: that
+    --    is usually the game's own records arriving after its models, which a
+    --    single pass read as "this server is broken".
+    local eggs, skipped, base, nrec, D
+    local zone = 0
+    for attempt = 1, CFG.SCAN_TRIES do
+        SCAN.phase = "scanning"
+        SCAN.detail = attempt == 1 and "single scan"
+            or ("rescan %d of %d · the game data was not ready"):format(attempt, CFG.SCAN_TRIES)
+        eggs, skipped, base, nrec, D = scanOnce()
+        SCAN.passes = attempt
+        zone = (D and D.zone) or 0
+        if zone == 0 or #eggs >= zone * CFG.SCAN_MIN_RATIO then break end
+        if attempt < CFG.SCAN_TRIES then task.wait(CFG.SCAN_RETRY) end
+    end
+
+    SCAN.found, SCAN.skipped, SCAN.base, SCAN.diag = #eggs, skipped, base, D
+    SCAN.eggs = eggs
+
+    -- Zone models were right there and none resolved: that is a resolution
+    -- fault, not an empty server. Sending full=true with an empty list would
+    -- tell the hub "nothing here" and wipe a good report.
+    if #eggs == 0 and zone > 0 then
+        SCAN.failStreak = (SCAN.failStreak or 0) + 1
+        SCAN.phase = "error"
+        SCAN.doneAt = os.time()
+        SCAN.sent = 0
+        SCAN.detail = ("%d zone models and 0 resolved after %d scans · nothing sent · see DIAGNOSTICS")
+            :format(zone, CFG.SCAN_TRIES)
+        -- A long streak still means the fault is probably here rather than on
+        -- the server, and that is worth saying. It is no longer a reason to
+        -- stop: a reporter that sits still reports nothing at all, whereas one
+        -- that keeps moving costs only teleports and recovers by itself the
+        -- moment the cause clears.
+        if SCAN.failStreak >= 3 then
+            HOP.status = ("%d servers in a row resolved nothing · still hopping")
+                :format(SCAN.failStreak)
+        end
+        return false
+    end
+
+    -- 3. Send.
+    SCAN.failStreak = 0
+    SCAN.phase = "sending"
+    SCAN.detail = ("sending %d eggs"):format(#eggs)
+
+    sendWebhook(eggs)
+    local ok, err = sendReport(eggs)
+
+    SCAN.sent = ok and #eggs or 0
+    SCAN.doneAt = os.time()
+    SCAN.phase = ok and "done" or "error"
+    SCAN.detail = ok
+        and ("%d sent · %d without record · %d base ignored%s")
+            :format(#eggs, skipped, base,
+                (zone > 0 and #eggs < zone * CFG.SCAN_MIN_RATIO)
+                    and (" · PARTIAL, only %d of %d models resolved"):format(#eggs, zone) or "")
+        or ("could not send: " .. tostring(err))
+
+    return ok and true or false
+end
 
 runScan = function(manual)
     if scanning then return end
     scanning = true
+    scanStartedAt = os.clock()
 
     task.spawn(function()
-        SCAN.phase, SCAN.passes = "waiting", 0
-
-        -- 1. Wait. Nothing is scanned here: it only waits for the signal that
-        --    the server has finished loading.
-        local zoneFolder, warn = waitForServer()
-        if not zoneFolder then
-            SCAN.phase = "error"
-            SCAN.detail = tostring(warn)
-            SCAN.doneAt = os.time()
-            scanning = false
-            return
-        end
-
-        -- 2. One scan. Just one.
-        SCAN.phase = "scanning"
-        SCAN.detail = "single scan"
-        local eggs, skipped, base, nrec, D = scanOnce()
-        SCAN.passes = 1
-        SCAN.found, SCAN.skipped, SCAN.base, SCAN.diag = #eggs, skipped, base, D
-        SCAN.eggs = eggs
-
-        local zone = (D and D.zone) or 0
-
-        -- Zone models were right there and none resolved: that is a resolution
-        -- fault, not an empty server. Sending full=true with an empty list would
-        -- tell the hub "nothing here" and wipe a good report.
-        if #eggs == 0 and zone > 0 then
-            SCAN.failStreak = (SCAN.failStreak or 0) + 1
-            SCAN.phase = "error"
-            SCAN.doneAt = os.time()
-            SCAN.sent = 0
-            SCAN.detail = ("%d zone models and 0 resolved · nothing sent · see DIAGNOSTICS")
-                :format(zone)
-            scanning = false
-
-            -- Failing on several servers in a row means the fault is not the
-            -- server: stop hopping and sit still so it can be looked at.
-            if SCAN.failStreak >= 3 then
-                HOP.status = "stopped: " .. SCAN.failStreak .. " servers in a row resolved nothing"
-                return
-            end
-            if not manual then task.wait(2); doHop() end
-            return
-        end
-
-        -- 3. Send.
-        SCAN.failStreak = 0
-        SCAN.phase = "sending"
-        SCAN.detail = ("sending %d eggs"):format(#eggs)
-
-        sendWebhook(eggs)
-        local ok, err = sendReport(eggs)
-
-        SCAN.sent = ok and #eggs or 0
-        SCAN.doneAt = os.time()
-        SCAN.phase = ok and "done" or "error"
-        SCAN.detail = ok
-            and ("%d sent · %d without record · %d base ignored")
-                :format(#eggs, skipped, base)
-            or ("could not send: " .. tostring(err))
-
+        -- The whole cycle runs inside pcall for one reason: without it, an
+        -- error anywhere left `scanning` true for ever, and since runScan bails
+        -- out while that flag is set, RESCAN silently did nothing from then on.
+        -- The flag is released here no matter what happens above.
+        local alive, res = pcall(scanCycle)
         scanning = false
 
-        -- 4. And only now, the hop. Never earlier, and only if the report landed.
-        if ok and not manual then
-            task.wait(1)
-            doHop()
+        if not alive then
+            SCAN.phase = "error"
+            SCAN.detail = "the scan failed: " .. tostring(res)
+            SCAN.doneAt = os.time()
+            SCAN.sent = 0
         end
+
+        -- 4. And only now, the hop — after the cycle, always, whatever the
+        --    outcome. A failed scan is a reason to try a different server, not
+        --    a reason to stop: the point of this client is to keep covering
+        --    servers, and one that comes to rest covers none.
+        if manual then return end
+        local sent = alive and res
+        task.wait(sent and 1 or 3)
+        doHop()
     end)
 end
+
+-- Watchdog for the cycle, the twin of the hop one above. If a scan has been
+-- running far longer than any real one takes, something is wedged inside it:
+-- release the flag so RESCAN works again, and move on rather than sit here.
+task.spawn(function()
+    while true do
+        task.wait(5)
+        if scanning and (os.clock() - scanStartedAt) > CFG.SCAN_STUCK then
+            scanning = false
+            SCAN.phase = "error"
+            SCAN.detail = ("the scan hung for %ds · moving on"):format(CFG.SCAN_STUCK)
+            SCAN.doneAt = os.time()
+            doHop()
+        end
+    end
+end)
 
 ----------------------------------------------------------------------
 -- LABELS (visual only, refreshed live)
