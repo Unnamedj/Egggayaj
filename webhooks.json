@@ -1,0 +1,9 @@
+{
+  "_comment": "Discord webhooks, one per alert route. Anyone who can read this file can post into these channels — the same caveat as proxies.txt. A WEBHOOK_<ROUTE> env var (WEBHOOK_SECRET, WEBHOOK_LOGS, …) overrides the matching entry here, so a leaked or rotated hook can be swapped without a commit. Leave a route as \"\" to disable it.",
+
+  "secret":  "https://discord.com/api/webhooks/1544891277550682182/FXVckPdafEYgNdq3KKcklANDu0bmA4_bOruMiyFDK13wWdeHeFyBbKJv5phqZ7Ig0CT1",
+  "eternal": "https://discord.com/api/webhooks/1544891397318910032/WAzgV6_5K5-1CpRZqOmW9w6sNHCkU1GZA2lgJo5-1jXAU75cGcv1dk8u5WcteTJnChD0",
+  "divine":  "https://discord.com/api/webhooks/1544891449957417031/UuDANw_Xv90ReIZcrCP4vhIEjAiQK9OsQc8BVaJNuZTb0ohRE4onSpmtuNaXbZRFjiRF",
+  "insane":  "https://discord.com/api/webhooks/1544891542999666708/Q7UeSwHNpWClYc9d5Wgg9bnFRksqz77qpqXb1vyuj6a94NEMRzHGHw13Bu8WSClylZxd",
+  "logs":    "https://discord.com/api/webhooks/1544891542999666708/Q7UeSwHNpWClYc9d5Wgg9bnFRksqz77qpqXb1vyuj6a94NEMRzHGHw13Bu8WSClylZxd"
+}

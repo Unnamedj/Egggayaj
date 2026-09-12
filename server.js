@@ -6,6 +6,7 @@ const path = require("path");
 const { URL } = require("url");
 const { Store } = require("./lib/store");
 const { Fetcher } = require("./lib/fetcher");
+const { Notifier } = require("./lib/discord");
 
 const PORT = Number(process.env.PORT) || 3000;
 const API_KEY = (process.env.API_KEY || "").trim();
@@ -20,6 +21,17 @@ const POOL_ENABLED = !/^(0|false|no)$/i.test(process.env.FETCHER_ENABLED || "1")
 
 const store = new Store({ serverTtlMs: SERVER_TTL_MS, claimTtlMs: CLAIM_TTL_MS });
 const pool = new Fetcher();
+const discord = new Notifier();
+
+// Rare finds and heavy ones go to Discord as they are first seen. This is the
+// only place it happens, so nothing is announced twice however many reporters
+// are running.
+store.onFreshEggs = (eggs, srv) => {
+  for (const e of eggs) discord.egg(e, srv);
+};
+// The scraper's warnings are worth seeing without opening the console; the
+// notifier batches and de-duplicates them before they reach the channel.
+pool.subscribe((row) => discord.log(row.level, row.text));
 
 const PUBLIC_DIR = path.join(__dirname, "public");
 const SCRIPTS_DIR = path.join(__dirname, "scripts");
@@ -493,6 +505,19 @@ const server = http.createServer(async (req, res) => {
       return await poolRoute(req, res, p.slice("/api/pool/".length), url);
     }
 
+    if (p === "/api/discord" && req.method === "GET") {
+      return send(res, 200, Object.assign({ ok: true, now: Date.now() }, discord.stats()));
+    }
+
+    if (p === "/api/discord/test" && req.method === "POST") {
+      const body = await readBody(req);
+      const name = String(body.route || "logs");
+      const hook = discord.route(name);
+      if (!hook) return send(res, 404, { error: "no such route", route: name });
+      hook.send({ username: "SAE Hub", content: "Test from the hub — this route works." });
+      return send(res, 200, { ok: true, route: name, queued: true });
+    }
+
     if (p === "/api/clients" && req.method === "GET") {
       const rows = store.clientRows();
       return send(res, 200, {
@@ -655,6 +680,11 @@ server.listen(PORT, () => {
 
   if (POOL_ENABLED) pool.start();
   else console.log("[EAG HUB] job-id pool disabled (FETCHER_ENABLED=0)");
+
+  const d = discord.stats();
+  console.log(`[EAG HUB] discord: ${d.enabled ? d.routes.join(", ") : "no webhooks configured"}` +
+    (d.enabled ? ` · alert over ${d.insaneKg} kg` : ""));
+  discord.start(() => Object.assign(store.snapshot(), { pool: pool.stats() }));
 });
 
 setInterval(() => store.prune(), 30000).unref();

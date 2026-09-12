@@ -23,6 +23,7 @@ REPORTER  ──POST /api/report──▶  HUB  ──POST /api/claim──▶  
 | `server.js` | HTTP server: API, static files, SSE |
 | `lib/store.js` | In-memory state: servers, eggs, claims, clients, activity log |
 | `lib/fetcher.js` | Job-id pool: scrapes Roblox through proxies and dispenses servers |
+| `lib/discord.js` | Discord relay: rare finds by rarity, heavy finds by weight, batched logs |
 | `lib/rarity.js` | The game's real rarity ladder (Common → Titan) |
 | `public/index.html` · `app.js` · `styles.css` | Operations console |
 | `scripts/ESP_v9.lua` | Reporter: **one scan, one report**, zone eggs only |
@@ -400,6 +401,62 @@ says so in the log — Roblox throttles that within seconds.
 
 ---
 
+## Discord alerts
+
+Rare finds are pushed to Discord as they are first seen. This happens in the
+hub, not in the reporter: the hub already knows which eggs are **new**, so
+nothing is announced twice however many reporters are running, and a webhook
+burst per client never happens.
+
+| Route | Gets |
+|---|---|
+| `secret` · `eternal` · `divine` | a find of that rarity, whatever it weighs |
+| `insane` | any find at or over `INSANE_KG`, whatever its rarity |
+| `logs` | scraper warnings and errors, batched — plus a periodic status card |
+
+A heavy Divine goes to **both** `divine` and `insane`: one channel is about
+what it is, the other about how big it is. Rarities without a route are not
+announced at all.
+
+`INSANE_KG` has no right default — it depends on the game's own scale. The hub
+tracks the heaviest egg it has ever seen and reports it as `maxKg` in
+`/api/meta` (and on the status card), so the threshold can be set from real
+numbers rather than guessed at.
+
+### What Discord enforces, and what this respects
+
+Webhooks are rate limited per hook, roughly 5 a second and 30 a minute. A
+reporter finishing a scan can hand over a dozen new eggs at once, so each route
+owns a FIFO queue drained no faster than one message per 1.1s. A 429 is not
+retried blindly — Discord says how long to wait in `retry_after`, and that is
+obeyed, re-sending the same message rather than losing it.
+
+Logs would otherwise drown the channel: the scraper emits a line per worker
+cycle and one per 429, hundreds a minute when Roblox pushes back. So lines are
+batched into a single message on a timer, identical lines collapse into `×N`,
+and only `warn` and `error` pass by default. Whether the scrape is healthy is
+answered by the status card instead.
+
+A failing webhook never reaches the request path — sends are queued, retried a
+few times, then dropped.
+
+### Configuring
+
+Routes live in `webhooks.json`, committed like `proxies.txt`. A
+`WEBHOOK_<ROUTE>` env var overrides the matching entry, so a rotated hook is
+swapped without a commit. **Anyone who can read the repo can post into these
+channels** — treat them as credentials, and keep the repo private if they are
+not throwaway.
+
+```bash
+# check what is wired up
+curl "$HUB/api/discord?key=$KEY"
+# post a test message to one route
+curl -X POST "$HUB/api/discord/test?key=$KEY" -d '{"route":"logs"}'
+```
+
+---
+
 ## The console
 
 Six views, reachable with keys `1`–`6`, `/` to focus the current view's search.
@@ -433,6 +490,8 @@ says which.
 | GET | `/api/servers` | Dashboard | Servers in detail |
 | GET | `/api/events` | Dashboard | Timestamped activity log |
 | GET | `/api/clients` | Dashboard | Connected reporters, auto joiners and pool clients |
+| GET | `/api/discord` | Admin | Which alert routes are wired up, and their send counts |
+| POST | `/api/discord/test` | Admin | Post a test message to one route |
 | POST | `/api/diag` | AJ | Why a filter returns nothing |
 | GET | `/api/stream` | Dashboard | Live SSE |
 | POST | `/api/purge` | Admin | Wipe everything |
