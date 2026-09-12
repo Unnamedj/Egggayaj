@@ -8,7 +8,6 @@ node_modules/
 luac.out
 *.luac
 
-# Proxy lines are credentials. Keep them out of the repo entirely — on Railway
-# the filesystem is rebuilt from git every deploy, so they belong in the
-# PROXIES env var anyway.
-proxies.txt
+# proxies.txt is intentionally tracked: this repo commits it instead of using
+# the PROXIES env var. Only do this in a PRIVATE repo — anyone who can read a
+# public one can read this file too, credentials included.

@@ -1,0 +1,19 @@
+# One proxy per line. Blank lines and lines starting with # are ignored.
+#
+# Accepted formats:
+#   user:pass@host:port
+#   host:port:user:pass
+#   user:pass:host:port
+#   http://user:pass@host:port
+#   host:port                (no credentials)
+#
+# This file is committed to git. It only takes effect if the PROXIES
+# environment variable in Railway is NOT set — PROXIES always wins over this
+# file. Delete the PROXIES variable in Railway after filling this in, or your
+# edits here will be silently ignored.
+#
+# This repo is public: anyone can read this file, credentials included. Do not
+# use this file with a proxy account you are not willing to have exposed.
+
+user:pass@gate.example.com:8000
+user:pass@gate.example.com:8001

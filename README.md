@@ -375,15 +375,23 @@ local nextJobId = HttpService:JSONDecode(r2.Body).new_jobid
 
 ### Proxies
 
-`PROXIES` (comma or newline separated) wins over `PROXY_FILE`, and is the right
-place for them on Railway, where the filesystem is rebuilt from git on every
-deploy. `proxies.txt` is gitignored — proxy lines are credentials. Accepted per
-line:
+`proxies.txt`, one per line, `#` comments allowed. It is **committed to git**
+in this repo, so it can be edited straight from GitHub — this only belongs in
+a **private** repo, since anyone who can read a public one can read this file,
+credentials included.
+
+Accepted per line:
 
 ```
 user:pass@host:port        host:port:user:pass
 user:pass:host:port        http://user:pass@host:port        host:port
 ```
+
+The `PROXIES` env var (comma or newline separated) is also supported and
+**wins over the file** if both are set — useful for a fork that wants to keep
+`proxies.txt` empty and configure proxies per Railway environment instead. If
+you edit `proxies.txt` and nothing changes, check that `PROXIES` is not also
+set and silently overriding it.
 
 A line that cannot be parsed is dropped at load rather than failing later on
 every request that happens to draw it. With none configured the scraper still
