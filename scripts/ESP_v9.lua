@@ -735,11 +735,16 @@ local function sendReport(eggs)
     -- the whole server silently, and nothing checked that the hub had actually
     -- kept what was sent. Now it retries, and it reads back `stored` to
     -- confirm the hub holds exactly as many eggs as went out.
+    -- No `goto`/`::label::` here: Luau has neither, and Roblox refuses to
+    -- compile the whole chunk if they appear. A `delivered` flag says the same
+    -- thing in syntax both dialects accept.
     local lastErr
     for attempt = 1, CFG.SEND_TRIES do
         local t0 = os.clock()
         local ok, res = httpPost(hubBase() .. "/api/report", body, { ["x-eag-key"] = HUB.key })
         HUB.lastMs = math.floor((os.clock() - t0) * 1000)
+
+        local delivered = false
 
         if ok then
             local stored
@@ -753,27 +758,29 @@ local function sendReport(eggs)
                 -- delivered rather than resending and risking a duplicate.
                 HUB.count = HUB.count + #payload
                 HUB.status = ("%d eggs · %dms · %s"):format(#payload, HUB.lastMs, os.date("%H:%M:%S"))
+                delivered = true
             elseif stored < #payload then
                 lastErr = ("hub kept %d of %d"):format(stored, #payload)
                 HUB.status = ("%s · retry %d/%d"):format(lastErr, attempt, CFG.SEND_TRIES)
-                if attempt < CFG.SEND_TRIES then task.wait(CFG.SEND_RETRY * attempt) end
-                goto continue
             else
                 HUB.count = HUB.count + #payload
                 HUB.status = ("%d eggs · stored %d ✓ · %dms · %s")
                     :format(#payload, stored, HUB.lastMs, os.date("%H:%M:%S"))
+                delivered = true
             end
+        else
+            lastErr = tostring(res)
+            HUB.status = ("error: %s · retry %d/%d"):format(lastErr, attempt, CFG.SEND_TRIES)
+        end
 
+        if delivered then
             LAST.payload = payload
             LAST.jobId = game.JobId
             LAST.at = os.time()
             return true
         end
 
-        lastErr = tostring(res)
-        HUB.status = ("error: %s · retry %d/%d"):format(lastErr, attempt, CFG.SEND_TRIES)
         if attempt < CFG.SEND_TRIES then task.wait(CFG.SEND_RETRY * attempt) end
-        ::continue::
     end
 
     HUB.status = "gave up: " .. tostring(lastErr)

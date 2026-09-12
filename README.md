@@ -23,6 +23,7 @@ REPORTER  ──POST /api/report──▶  HUB  ──POST /api/claim──▶  
 | `scripts/ESP_v9.lua` | Reporter: **one scan, one report**, zone eggs only |
 | `scripts/AJ_v5.lua` | Auto joiner: new UI, mobile and PC |
 | `Dockerfile` · `railway.json` | Deployment |
+| `tools/check-luau.sh` | Compiles both scripts with the real Luau compiler |
 
 Everything the user sees is in English. Internal identifiers (`x-eag-key`, the
 hub's file names) are deliberately unchanged so existing deployments keep
@@ -72,6 +73,24 @@ That same URL is what the reporter re-queues on teleport, so the sweep keeps
 going with no separate "raw script URL" to keep in sync. Anything you type in
 the panel still overrides the baked-in values and is remembered; a blank saved
 value no longer wipes them.
+
+## The scripts are checked with Luau, not with Lua
+
+Roblox runs **Luau**, not Lua 5.4, and the two are not the same language.
+`luac5.4 -p` accepted a `goto continue` / `::continue::` pair in the reporter's
+retry loop; Luau has no `goto` and no labels, so Roblox refused to compile the
+chunk, `loadstring` returned `nil`, and the loader died on its second line with
+*attempt to call a nil value* — with the joiner working fine, because it had no
+`goto`.
+
+```
+                      luac5.4 -p     luau-compile
+reporter (before)     accepted       SyntaxError at 760 and 776
+reporter (after)      accepted       compiled
+```
+
+The loop now uses a `delivered` flag, which both dialects accept, and
+`tools/check-luau.sh` runs the real compiler over `scripts/`.
 
 ---
 
