@@ -3,119 +3,220 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>SAE HUB</title>
+<title>SAE Hub · console</title>
 <link rel="stylesheet" href="/styles.css" />
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%A5%9A%3C/text%3E%3C/svg%3E" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0b0d'/%3E%3Cpath d='M9 21V11h6.2M9 16h5.4M20 11v10' stroke='%23f0a02a' stroke-width='2.4' fill='none' stroke-linecap='square'/%3E%3C/svg%3E" />
 </head>
 <body>
 
+<!-- ────────────────────────────────────────────────────────────────── gate -->
 <div id="gate" class="gate">
   <form class="gate-card" id="gateForm">
-    <div class="brand"><span class="brand-mark"></span>SAE<b>HUB</b></div>
-    <p>Enter the API key to open the live feed.</p>
-    <input id="gateKey" type="password" placeholder="API key" autocomplete="off" spellcheck="false" />
-    <button id="gateBtn" type="submit">Connect</button>
-    <div id="gateErr" class="gate-err"></div>
+    <div class="gate-mark"><span>SAE</span></div>
+    <h1>Operations console</h1>
+    <p>This instance is key-protected. Paste the hub key to attach.</p>
+    <input id="gateKey" type="password" placeholder="hub key" autocomplete="off" spellcheck="false" />
+    <button id="gateBtn" type="submit">Attach</button>
+    <div id="gateErr" class="gate-err" role="alert"></div>
   </form>
 </div>
 
+<!-- ────────────────────────────────────────────────────────────────── rail -->
+<nav class="rail" aria-label="Sections">
+  <div class="rail-mark" title="SAE Hub">SAE</div>
+  <button class="nav on" data-view="overview" title="Overview (1)"><span class="nav-k">1</span>Overview</button>
+  <button class="nav" data-view="eggs"     title="Eggs (2)"><span class="nav-k">2</span>Eggs<b id="nEggs"></b></button>
+  <button class="nav" data-view="pool"     title="Job ID pool (3)"><span class="nav-k">3</span>Pool<b id="nPool"></b></button>
+  <button class="nav" data-view="servers"  title="Reporting servers (4)"><span class="nav-k">4</span>Servers<b id="nSrv"></b></button>
+  <button class="nav" data-view="clients"  title="Connected clients (5)"><span class="nav-k">5</span>Clients<b id="nCli"></b></button>
+  <button class="nav" data-view="logs"     title="Scraper log (6)"><span class="nav-k">6</span>Logs<b id="nLog"></b></button>
+  <div class="rail-sp"></div>
+  <button class="nav quiet" id="btnKey" title="Detach / change key"><span class="nav-k">·</span>Detach</button>
+</nav>
+
+<!-- ──────────────────────────────────────────────────────────────── header -->
 <header class="top">
-  <div class="brand"><span class="brand-mark"></span>SAE<b>HUB</b></div>
-
-  <div class="status" id="conn"><i></i><span>connecting</span></div>
-
-  <div class="stats">
-    <div class="stat"><b id="kServers">—</b><span>servers</span></div>
-    <div class="stat"><b id="kEggs">—</b><span>eggs</span></div>
-    <div class="stat"><b id="kMatch">—</b><span>match</span></div>
-    <div class="stat"><b id="kClaims">—</b><span>claims</span></div>
-    <div class="stat"><b id="kRate">—</b><span>/min</span></div>
-    <div class="stat"><b id="kLast">—</b><span>latest</span></div>
+  <div class="ident">
+    <div class="ident-name">SAE&nbsp;HUB</div>
+    <div class="ident-sub">game <code id="hGame">—</code></div>
   </div>
 
-  <button class="icon-btn" id="btnLogout" title="Change API key" aria-label="Change API key">
-    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
-      <path d="M12 6V4.5A1.5 1.5 0 0 0 10.5 3h-5A1.5 1.5 0 0 0 4 4.5v11A1.5 1.5 0 0 0 5.5 17h5a1.5 1.5 0 0 0 1.5-1.5V14"/>
-      <path d="M9 10h8m0 0-2.5-2.5M17 10l-2.5 2.5"/>
-    </svg>
-  </button>
+  <div class="link" id="conn" data-state="wait">
+    <i></i><span id="connTxt">attaching</span>
+  </div>
+
+  <div class="readout" id="readout">
+    <div class="ro"><b id="kPool">—</b><span>pool</span></div>
+    <div class="ro"><b id="kFree">—</b><span>free</span></div>
+    <div class="ro"><b id="kServers">—</b><span>servers</span></div>
+    <div class="ro"><b id="kEggs">—</b><span>eggs</span></div>
+    <div class="ro"><b id="kClients">—</b><span>clients</span></div>
+    <div class="ro"><b id="kDelay">—</b><span>delay</span></div>
+  </div>
 </header>
 
 <main>
-  <!-- ───────────────────────────────────────────────────────── filters -->
-  <aside class="side">
-    <section class="card">
-      <h3>Rarities</h3>
-      <div id="chips" class="chips"></div>
-      <div class="chip-actions">
-        <button class="link" data-pick="all">all</button>
-        <button class="link" data-pick="none">none</button>
-        <button class="link" data-pick="top">rare only</button>
-      </div>
-    </section>
 
-    <section class="card">
-      <h3>Weight and age</h3>
-      <div class="grid2">
-        <label class="fld"><span>Min kg</span><input id="minKg" type="number" min="0" step="1" placeholder="0" /></label>
-        <label class="fld"><span>Max kg</span><input id="maxKg" type="number" min="0" step="1" placeholder="∞" /></label>
-      </div>
-      <label class="fld"><span>Maximum age</span>
-        <select id="maxAge">
-          <option value="">no limit</option>
-          <option value="60">1 minute</option>
-          <option value="300">5 minutes</option>
-          <option value="900">15 minutes</option>
-          <option value="3600">1 hour</option>
-        </select>
-      </label>
-      <label class="fld"><span>Search</span>
-        <input id="search" type="text" placeholder="species, pet or job id" spellcheck="false" />
-      </label>
-      <label class="check"><input id="onlyFree" type="checkbox" /><span>Unclaimed only</span></label>
-      <label class="check"><input id="onlySlot" type="checkbox" /><span>With a free slot only</span></label>
-      <label class="check"><input id="live" type="checkbox" checked /><span>Live updates</span></label>
-    </section>
-
-    <section class="card">
-      <h3>Distribution</h3>
-      <div id="dist" class="dist"><span class="dim">no data yet</span></div>
-    </section>
-
-    <section class="card">
-      <h3>Endpoint</h3>
-      <code id="baseUrl" class="code">—</code>
-      <button class="btn ghost full" id="btnCopy">Copy base URL</button>
-    </section>
-  </aside>
-
-  <!-- ───────────────────────────────────────────────────────── content -->
-  <section class="card pane">
-    <nav class="tabs">
-      <button class="tab active" data-tab="eggs">Eggs <b id="tEggs">0</b></button>
-      <button class="tab" data-tab="servers">Servers <b id="tServers">0</b></button>
-      <button class="tab" data-tab="feed">Activity</button>
-    </nav>
-
-    <div id="tab-eggs" class="tab-body">
-      <div class="thead eggs">
-        <span>Egg</span><span>Rarity</span><span class="num">Weight</span><span>Server</span><span>Seen</span><span></span>
-      </div>
-      <div id="eggRows" class="rows"></div>
-      <div id="eggEmpty" class="empty">No eggs match the filters.</div>
+<!-- ────────────────────────────────────────────────────────────── overview -->
+<section class="view on" id="v-overview">
+  <div class="slab">
+    <div class="panel wide">
+      <div class="ph"><h2>Pool composition</h2><span class="ph-note" id="poolNote">—</span></div>
+      <div class="gauge" id="poolGauge"></div>
+      <div class="legend" id="poolLegend"></div>
     </div>
 
-    <div id="tab-servers" class="tab-body hidden">
-      <div id="srvRows" class="rows cards"></div>
-      <div id="srvEmpty" class="empty">No server is reporting right now.</div>
+    <div class="panel">
+      <div class="ph"><h2>Scrape rate</h2><span class="ph-note">requests / 5s</span></div>
+      <div class="spark" id="sparkReq"></div>
+      <div class="kv">
+        <div><span>ok</span><b id="sOk">—</b></div>
+        <div><span>failed</span><b id="sFail">—</b></div>
+        <div><span>429s</span><b id="sRate">—</b></div>
+        <div><span>proxy err</span><b id="sProxy">—</b></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="slab">
+    <div class="panel">
+      <div class="ph"><h2>Throttle</h2><span class="ph-note">adaptive delay</span></div>
+      <div class="meter"><i id="delayBar"></i><em id="delayTxt">—</em></div>
+      <p class="hint" id="delayHint">The gap between requests. It climbs on a 429 or a proxy error and eases back down while the scrape is healthy.</p>
     </div>
 
-    <div id="tab-feed" class="tab-body hidden">
-      <div id="feedRows" class="rows feed"></div>
-      <div id="feedEmpty" class="empty">No activity yet.</div>
+    <div class="panel">
+      <div class="ph"><h2>Concurrency</h2><span class="ph-note">in flight / queued</span></div>
+      <div class="meter"><i id="concBar"></i><em id="concTxt">—</em></div>
+      <p class="hint" id="concHint">—</p>
     </div>
-  </section>
+
+    <div class="panel">
+      <div class="ph"><h2>Proxies</h2><span class="ph-note" id="proxNote">—</span></div>
+      <div class="big" id="proxBig">—</div>
+      <p class="hint" id="proxHint">—</p>
+    </div>
+  </div>
+
+  <div class="slab">
+    <div class="panel wide">
+      <div class="ph"><h2>Workers</h2><span class="ph-note">one scrape loop each</span></div>
+      <div class="workers" id="workers"><span class="dim">no workers running</span></div>
+    </div>
+    <div class="panel">
+      <div class="ph"><h2>Rarity mix</h2><span class="ph-note">reported eggs</span></div>
+      <div class="dist" id="dist"><span class="dim">nothing reported yet</span></div>
+    </div>
+  </div>
+
+  <div class="slab">
+    <div class="panel wide">
+      <div class="ph"><h2>Live tape</h2><span class="ph-note">latest scraper lines</span></div>
+      <div class="tape" id="tapeMini"></div>
+    </div>
+    <div class="panel">
+      <div class="ph"><h2>Endpoints</h2><span class="ph-note">for your bots</span></div>
+      <div class="endp" id="endpoints"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────── eggs -->
+<section class="view" id="v-eggs">
+  <div class="bar">
+    <div class="chips" id="chips"></div>
+    <div class="bar-sp"></div>
+    <button class="tinybtn" data-pick="all">all</button>
+    <button class="tinybtn" data-pick="top">rare+</button>
+    <button class="tinybtn" data-pick="none">none</button>
+  </div>
+
+  <div class="bar">
+    <label class="fld"><span>min kg</span><input id="minKg" type="number" min="0" step="1" placeholder="0" /></label>
+    <label class="fld"><span>max kg</span><input id="maxKg" type="number" min="0" step="1" placeholder="∞" /></label>
+    <label class="fld"><span>max age</span>
+      <select id="maxAge">
+        <option value="">any</option>
+        <option value="60">1 min</option>
+        <option value="300">5 min</option>
+        <option value="900">15 min</option>
+        <option value="3600">1 hour</option>
+      </select>
+    </label>
+    <label class="fld grow"><span>search</span><input id="search" type="text" placeholder="species, pet or job id  ( / )" spellcheck="false" /></label>
+    <label class="tick"><input id="onlyFree" type="checkbox" /><span>unclaimed</span></label>
+    <label class="tick"><input id="onlySlot" type="checkbox" /><span>has slot</span></label>
+    <label class="tick"><input id="live" type="checkbox" checked /><span>live</span></label>
+  </div>
+
+  <div class="tbl eggs">
+    <div class="th"><span>egg</span><span>rarity</span><span class="r">kg</span><span>server</span><span>seen</span><span></span></div>
+    <div id="eggRows" class="tb"></div>
+  </div>
+  <div id="eggEmpty" class="empty">No egg matches these filters.</div>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────── pool -->
+<section class="view" id="v-pool">
+  <div class="bar">
+    <label class="fld"><span>max players</span><input id="poolMax" type="number" min="0" step="1" placeholder="any" /></label>
+    <label class="fld grow"><span>find job id</span><input id="poolFind" type="text" placeholder="paste or type a job id" spellcheck="false" /></label>
+    <label class="tick"><input id="poolFree" type="checkbox" /><span>available only</span></label>
+    <div class="bar-sp"></div>
+    <button class="tinybtn" id="btnDispense" title="Take one job id, exactly as a bot would">take one</button>
+    <button class="tinybtn" id="btnRecycle" title="Free every dispensed job id whose window has passed">recycle</button>
+    <button class="tinybtn danger" id="btnClear" title="Throw the whole pool away">clear</button>
+  </div>
+
+  <div class="strip" id="poolStrip"></div>
+
+  <div class="tbl pool">
+    <div class="th"><span>job id</span><span>players</span><span>state</span><span>seen</span><span></span></div>
+    <div id="poolRows" class="tb"></div>
+  </div>
+  <div id="poolEmpty" class="empty">The pool is empty. The scraper fills it within a few seconds of boot.</div>
+</section>
+
+<!-- ─────────────────────────────────────────────────────────────── servers -->
+<section class="view" id="v-servers">
+  <div class="bar">
+    <label class="fld grow"><span>filter</span><input id="srvFind" type="text" placeholder="job id or reporter" spellcheck="false" /></label>
+  </div>
+  <div id="srvRows" class="cards"></div>
+  <div id="srvEmpty" class="empty">No reporter is pushing eggs right now.</div>
+</section>
+
+<!-- ─────────────────────────────────────────────────────────────── clients -->
+<section class="view" id="v-clients">
+  <div class="bar"><span class="note" id="cliNote">—</span></div>
+  <div class="tbl clients">
+    <div class="th"><span>client</span><span>role</span><span>activity</span><span>last job</span><span>seen</span></div>
+    <div id="cliRows" class="tb"></div>
+  </div>
+  <div id="cliEmpty" class="empty">Nothing has identified itself yet. A reporter or auto-joiner shows up here on its first call.</div>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────── logs -->
+<section class="view" id="v-logs">
+  <div class="bar">
+    <div class="seg" id="logLevel">
+      <button class="on" data-level="">all</button>
+      <button data-level="info">info</button>
+      <button data-level="warn">warn</button>
+      <button data-level="error">error</button>
+    </div>
+    <label class="fld grow"><span>contains</span><input id="logFind" type="text" placeholder="filter lines" spellcheck="false" /></label>
+    <label class="tick"><input id="logFollow" type="checkbox" checked /><span>follow</span></label>
+    <div class="bar-sp"></div>
+    <button class="tinybtn" id="btnLogCopy">copy</button>
+  </div>
+  <div class="tape big" id="tape"></div>
+  <div id="logEmpty" class="empty">No log lines yet.</div>
+</section>
+
 </main>
+
+<div class="toast" id="toast"></div>
 
 <script src="/app.js"></script>
 </body>

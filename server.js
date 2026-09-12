@@ -5,6 +5,7 @@ const fs = require("fs");
 const path = require("path");
 const { URL } = require("url");
 const { Store } = require("./lib/store");
+const { Fetcher } = require("./lib/fetcher");
 
 const PORT = Number(process.env.PORT) || 3000;
 const API_KEY = (process.env.API_KEY || "").trim();
@@ -12,8 +13,13 @@ const PUBLIC_READ = /^(1|true|yes)$/i.test(process.env.PUBLIC_READ || "");
 const SERVER_TTL_MS = Number(process.env.SERVER_TTL_SEC || 480) * 1000;
 const CLAIM_TTL_MS = Number(process.env.CLAIM_TTL_SEC || 240) * 1000;
 const MAX_BODY = Number(process.env.MAX_BODY_BYTES || 1024 * 1024);
+// The scraper is the one part that reaches out to Roblox on its own, so it has
+// an off switch: a second instance of the hub sharing one proxy account would
+// double the request rate for no extra coverage.
+const POOL_ENABLED = !/^(0|false|no)$/i.test(process.env.FETCHER_ENABLED || "1");
 
 const store = new Store({ serverTtlMs: SERVER_TTL_MS, claimTtlMs: CLAIM_TTL_MS });
+const pool = new Fetcher();
 
 const PUBLIC_DIR = path.join(__dirname, "public");
 const SCRIPTS_DIR = path.join(__dirname, "scripts");
@@ -170,6 +176,21 @@ function ipOf(req) {
   return req.socket.remoteAddress || "";
 }
 
+// Who is calling. `username` is the header the original fetcher's clients send;
+// `client` is what the AJ already used on /api/claim. Accepting both means one
+// bot can talk to both halves of the hub without being counted as two.
+function clientOf(req, url, body) {
+  const raw =
+    (body && body.client) ||
+    (body && body.username) ||
+    req.headers["username"] ||
+    req.headers["x-eag-client"] ||
+    url.searchParams.get("client") ||
+    url.searchParams.get("username") ||
+    "";
+  return String(raw).trim().slice(0, 64);
+}
+
 // ------------------------------------------------------------------- static
 function serveStatic(req, res, pathname) {
   let rel = pathname === "/" ? "/index.html" : pathname;
@@ -243,6 +264,111 @@ function serveScript(req, res, name, url) {
   });
 }
 
+// ------------------------------------------------------------------- pool
+// The scraped job-id pool. Canonical paths live under /api/pool/; the bare
+// names the original fetcher used (/server, /remove, …) are kept as aliases so
+// a bot written against it works here unchanged.
+//
+// Everything is behind the same key as the rest of the hub. Dispensing is a
+// write in every sense that matters — it mutates the pool and hands out a
+// scarce resource — so an open instance would be drained by whoever found it.
+async function poolRoute(req, res, name, url) {
+  const q = url.searchParams;
+  const method = req.method;
+
+  const maxPlaying = (() => {
+    const v = num(q.get("max"));
+    return v != null && v >= 0 ? v : null;
+  })();
+
+  if (name === "stats" && method === "GET") {
+    return send(res, 200, Object.assign({ ok: true, now: Date.now() }, pool.stats()));
+  }
+
+  if (name === "logs" && method === "GET") {
+    return send(res, 200, {
+      ok: true,
+      now: Date.now(),
+      seq: pool.logSeq,
+      logs: pool.logs({
+        limit: num(q.get("limit")) || 200,
+        sinceSeq: num(q.get("sinceSeq")),
+        level: (q.get("level") || "").trim() || null,
+      }),
+    });
+  }
+
+  if (name === "servers" && method === "GET") {
+    const rows = pool.rows(Math.min(num(q.get("limit")) || 300, 5000), maxPlaying);
+    return send(res, 200, { ok: true, now: Date.now(), total: pool.servers.size, servers: rows });
+  }
+
+  if (name === "server" && method === "GET") {
+    const client = clientOf(req, url, null);
+    if (!client) return send(res, 400, { error: "a username header (or ?client=) is required" });
+    const size = Math.trunc(num(q.get("size")) || 1);
+    if (size < 1 || size > 1000) return send(res, 400, { error: "size must be between 1 and 1000" });
+
+    const out = await pool.dispense(size, maxPlaying, client);
+    store.touchClient(client, "pool", {
+      ip: ipOf(req),
+      dispenses: 1,
+      jobIds: out.ok ? out.servers.length : 0,
+      jobId: out.ok ? out.servers[0].jobId : null,
+    });
+    if (!out.ok) return send(res, 503, Object.assign({ ok: false }, out));
+
+    // text/plain, one job id per line, is what the original answered and what
+    // the Lua side parses with a single pattern match. JSON is available to
+    // anything that asks for it.
+    if ((q.get("format") || "").toLowerCase() === "json") {
+      return send(res, 200, Object.assign({ ok: true, now: Date.now() }, out));
+    }
+    const body = out.servers.map((s) => s.jobId).join("\n");
+    return send(res, 200, body, { "content-type": "text/plain; charset=utf-8" });
+  }
+
+  if (name === "remove" && (method === "POST" || method === "DELETE")) {
+    const body = method === "POST" ? await readBody(req) : {};
+    const client = clientOf(req, url, body);
+    if (!client) return send(res, 400, { error: "a username header (or ?client=) is required" });
+    const jobId = String(body.jobid || body.jobId || q.get("jobid") || "").trim();
+    if (!jobId) return send(res, 400, { error: "jobid is required" });
+
+    const out = await pool.replace(jobId, maxPlaying, client);
+    store.touchClient(client, "pool", { ip: ipOf(req), drops: 1, jobId });
+    if (!out.ok) return send(res, 503, Object.assign({ ok: false }, out));
+    // new_jobid is the field name the original returned; jobId is the one the
+    // rest of this hub uses. Both are sent so neither client has to change.
+    return send(res, 200, Object.assign({ ok: true, new_jobid: out.jobId }, out));
+  }
+
+  if (name === "recycle" && (method === "GET" || method === "POST")) {
+    const n = pool.recycle();
+    return send(res, 200, {
+      ok: true,
+      recycled: n,
+      stillDispensed: pool.dispensed.size,
+      available: pool.servers.size - pool.dispensed.size,
+    });
+  }
+
+  if (name === "clear") {
+    // A GET that empties the pool is exactly the sort of thing a crawler or a
+    // link preview fires by accident.
+    if (method === "GET") return send(res, 405, { error: "use POST or DELETE to clear" });
+    if (method === "POST" || method === "DELETE") {
+      return send(res, 200, { ok: true, cleared: pool.clear() });
+    }
+  }
+
+  if (name === "reload" && (method === "POST" || method === "GET")) {
+    return send(res, 200, { ok: true, proxies: pool.loadProxies() });
+  }
+
+  return send(res, 404, { error: "unknown pool endpoint", name, method });
+}
+
 // ---------------------------------------------------------------- long poll
 const WAKE_ON = { eggs: 1, egg: 1, release: 1, purge: 1, gone: 1 };
 
@@ -289,11 +415,17 @@ function sse(req, res) {
   const off = store.subscribe((ev) => {
     res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`);
   });
+  // The scraper's log goes down the same pipe, so the dashboard's Logs tab is
+  // live rather than polled.
+  const offPool = pool.subscribe((row) => {
+    res.write(`event: pool-log\ndata: ${JSON.stringify(row)}\n\n`);
+  });
   const ping = setInterval(() => res.write(`: ping\n\n`), 20000);
 
   req.on("close", () => {
     clearInterval(ping);
     off();
+    offPool();
   });
 }
 
@@ -328,21 +460,58 @@ const server = http.createServer(async (req, res) => {
     return serveScript(req, res, p.slice("/script/".length), url);
   }
 
-  if (!p.startsWith("/api/")) {
+  // The bare paths the standalone fetcher served. Kept so a bot written
+  // against it runs here with only its host changed.
+  const LEGACY_POOL = {
+    "/server": "server",
+    "/remove": "remove",
+    "/servers": "servers",
+    "/stats": "stats",
+    "/recycle": "recycle",
+    "/clear": "clear",
+  };
+  const isPool = p.startsWith("/api/pool/") || !!LEGACY_POOL[p];
+
+  if (!p.startsWith("/api/") && !LEGACY_POOL[p]) {
     if (req.method !== "GET") return send(res, 405, { error: "method" });
     return serveStatic(req, res, p);
   }
 
-  const needsWrite = req.method !== "GET";
+  // Handing out a job id mutates the pool and spends a scarce resource, so it
+  // needs the key even though it is a GET. PUBLIC_READ opens the egg feed to
+  // anyone; it must not open the dispenser too.
+  const needsWrite = req.method !== "GET" || isPool;
   const ok = authed(req, url);
   if (!ok && (needsWrite || !PUBLIC_READ)) {
     return send(res, 401, { error: "bad or missing key" });
   }
 
+  if (LEGACY_POOL[p]) return poolRoute(req, res, LEGACY_POOL[p], url);
+
   try {
+    if (p.startsWith("/api/pool/")) {
+      return await poolRoute(req, res, p.slice("/api/pool/".length), url);
+    }
+
+    if (p === "/api/clients" && req.method === "GET") {
+      const rows = store.clientRows();
+      return send(res, 200, {
+        ok: true,
+        now: Date.now(),
+        total: rows.length,
+        online: rows.filter((r) => r.online).length,
+        clients: rows,
+      });
+    }
+
     if (p === "/api/report" && req.method === "POST") {
       const body = await readBody(req);
       const out = store.report(body, { ip: ipOf(req) });
+      store.touchClient(clientOf(req, url, body) || body.reporter, "reporter", {
+        ip: ipOf(req),
+        reports: 1,
+        jobId: out.jobId,
+      });
       return send(res, 200, Object.assign({ ok: true }, out));
     }
 
@@ -399,6 +568,8 @@ const server = http.createServer(async (req, res) => {
       const client = (body.client || q.get("client") || "anon").toString().slice(0, 64);
       const waitSec = waitSecondsOf(q, body);
 
+      store.touchClient(client, "joiner", { ip: ipOf(req) });
+
       let result = store.claim(filter, client);
       if (!result && waitSec > 0) {
         const deadline = Date.now() + waitSec * 1000;
@@ -412,6 +583,7 @@ const server = http.createServer(async (req, res) => {
       if (!result) {
         return send(res, 200, { ok: true, found: false, now: Date.now(), eggSeq: store._eggSeq });
       }
+      store.touchClient(client, "joiner", { claims: 1, jobId: result.target.jobId });
       return send(res, 200, {
         ok: true,
         found: true,
@@ -427,11 +599,18 @@ const server = http.createServer(async (req, res) => {
     if (p === "/api/release" && req.method === "POST") {
       const body = await readBody(req);
       const done = store.release(String(body.jobId || ""), String(body.client || "*"));
+      store.touchClient(clientOf(req, url, body), "joiner", { ip: ipOf(req), releases: done ? 1 : 0 });
       return send(res, 200, { ok: true, released: done });
     }
 
     if (p === "/api/hop" && req.method === "POST") {
       const body = await readBody(req);
+      store.touchClient(clientOf(req, url, body), "joiner", {
+        ip: ipOf(req),
+        hops: 1,
+        hopFails: body.ok ? 0 : 1,
+        jobId: String(body.jobId || "") || null,
+      });
       return send(res, 200, store.hop(body));
     }
 
@@ -442,7 +621,10 @@ const server = http.createServer(async (req, res) => {
           claimTtlSec: CLAIM_TTL_MS / 1000,
           publicRead: PUBLIC_READ,
           keyRequired: !!API_KEY,
+          gameId: pool.gameId,
+          poolEnabled: POOL_ENABLED,
         },
+        pool: pool.stats(),
       }));
     }
 
@@ -470,6 +652,9 @@ server.listen(PORT, () => {
   const names = Object.keys(SCRIPTS).filter((n) =>
     fs.existsSync(path.join(SCRIPTS_DIR, SCRIPTS[n])));
   console.log(`[EAG HUB] scripts served: ${names.length ? names.join(", ") : "NONE — scripts/ missing from the image"}`);
+
+  if (POOL_ENABLED) pool.start();
+  else console.log("[EAG HUB] job-id pool disabled (FETCHER_ENABLED=0)");
 });
 
 setInterval(() => store.prune(), 30000).unref();

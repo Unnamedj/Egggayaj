@@ -7,9 +7,13 @@ web dashboard.
 Node.js, zero dependencies, ready for Railway.
 
 ```
+                     ┌─ scrapes games.roblox.com through rotating proxies
+                     ▼
+                JOB ID POOL ──GET /api/pool/server──▶ any bot that needs a server
+                     │
 REPORTER  ──POST /api/report──▶  HUB  ──POST /api/claim──▶  AUTO JOINER
 (scans zones)                     │                        (hops to the server)
-                                  └──▶ Dashboard (live over SSE)
+                                  └──▶ Console (live over SSE)
 ```
 
 ## Layout
@@ -17,9 +21,10 @@ REPORTER  ──POST /api/report──▶  HUB  ──POST /api/claim──▶  
 | File | What it does |
 |---|---|
 | `server.js` | HTTP server: API, static files, SSE |
-| `lib/store.js` | In-memory state: servers, eggs, claims, activity log |
+| `lib/store.js` | In-memory state: servers, eggs, claims, clients, activity log |
+| `lib/fetcher.js` | Job-id pool: scrapes Roblox through proxies and dispenses servers |
 | `lib/rarity.js` | The game's real rarity ladder (Common → Titan) |
-| `public/index.html` · `app.js` · `styles.css` | Dashboard |
+| `public/index.html` · `app.js` · `styles.css` | Operations console |
 | `scripts/ESP_v9.lua` | Reporter: **one scan, one report**, zone eggs only |
 | `scripts/AJ_v5.lua` | Auto joiner: new UI, mobile and PC |
 | `Dockerfile` · `railway.json` | Deployment |
@@ -37,7 +42,9 @@ working.
 4. Settings → Networking → **Generate Domain**. That URL is your `HUB_URL`.
 
 Optional variables: `PUBLIC_READ` (true = dashboard without a key),
-`SERVER_TTL_SEC` (480), `CLAIM_TTL_SEC` (240).
+`SERVER_TTL_SEC` (480), `CLAIM_TTL_SEC` (240), and for the job-id pool
+`GAME_ID` (107778070777162), `PROXIES`, `SCRAPER_WORKERS` (10),
+`MAX_CONCURRENT_REQUESTS` (5), `FETCHER_ENABLED` (1). See `.env.example`.
 
 Locally:
 
@@ -267,6 +274,144 @@ it is needed most.
 
 ---
 
+## The job-id pool
+
+Roblox rate-limits its server list **per IP**. Forty bots each asking Roblox
+directly get all forty throttled — which is exactly what the reporter's own
+hop kept running into. So one process does the asking, spreading it over a pool
+of proxies, and the bots ask *this* hub for a job id that is already cached.
+
+`lib/fetcher.js` tracks game `107778070777162` by default (`GAME_ID`).
+
+### The ideas that make it work
+
+**The pool is RAM, not a database.** `jobId → {playing, maxPlayers, lastSeen}`.
+A restart starts empty and refills in seconds. The information is only true for
+minutes, so persisting it would buy nothing and complicate the deploy.
+
+**Dispensing is not deleting.** A job id handed to a bot is marked `dispensed`
+but stays in the pool. After `RECYCLE_SEC` the bot has either used it or given
+up, so it becomes available again. That is what stops two bots being sent to the
+same server without constant re-scraping.
+
+**One proxy per request.** Proxies are consumed round-robin from a shuffled
+copy, never starting a new round on the proxy that just went out. With sticky
+proxies each line is a distinct exit IP, so more lines means more real
+parallelism rather than one IP going faster.
+
+**Two concurrency limits, two different problems.** `AGENT_MAX_SOCKETS` caps
+connections through *one* proxy, so a single saturated gateway stops dropping
+sockets. `MAX_CONCURRENT_REQUESTS` caps requests in flight across the whole
+process — that is what protects the proxy *account*, because exceeding a plan's
+concurrent-session limit arrives as a wave of 502s and TLS resets. More proxies
+do not fix that; the queue does.
+
+**Adaptive backoff, not a fixed delay.** The gap between requests starts at
+100ms and climbs to 10s on a 429, a network error or a 5xx, then eases back down
+while the scrape is healthy. A healthy account settles at the floor; an
+exhausted one backs off on its own instead of retrying flat out. Measured on one
+IP with no proxies: the delay climbed 100 → 960ms over nine 429s and stopped
+making things worse, instead of hammering at full speed.
+
+**A response timeout is not enough.** It only starts counting once the
+connection is up. A dead HTTPS proxy hangs during the CONNECT handshake, where
+that timer never starts, and the request sits there for ever holding a
+concurrency slot. There are two guards: one on the CONNECT itself, and a hard
+abort that destroys the request whatever phase it is stuck in.
+
+**Pagination stops early.** Each cycle walks up to ten pages of 100. If a whole
+page brings nothing new, the cycle ends there — paging on would spend proxy
+traffic re-reading what we already hold.
+
+### Ported to zero dependencies
+
+The original ran on `express` + `axios` + `https-proxy-agent`. This hub ships
+with no dependencies and its `Dockerfile` never runs an install, so adding three
+would have broken the deploy the moment it was pushed. The logic is the same on
+node built-ins: an `https.Agent` subclass that tunnels via the proxy's `CONNECT`
+verb replaces `https-proxy-agent`, `https.request` replaces `axios`, and the
+hub's own router replaces `express`.
+
+### Pool routes
+
+Canonical paths are under `/api/pool/`. The bare names the standalone fetcher
+used are kept as aliases, so a bot written against it runs here with only its
+host changed.
+
+| Method | Route | Alias | What it does |
+|---|---|---|---|
+| GET | `/api/pool/server?size=N&max=P` | `/server` | Dispense N job ids, emptiest first |
+| POST | `/api/pool/remove` | `/remove` | Body `{jobid}` — drop a dead one, get a replacement in the same trip |
+| GET | `/api/pool/servers` | `/servers` | Everything cached, with its state |
+| GET | `/api/pool/stats` | `/stats` | Pool, scraper and proxy health |
+| GET | `/api/pool/logs` | — | The scraper's log (also live over SSE) |
+| POST | `/api/pool/recycle` | `/recycle` | Free every dispensed id whose window has passed |
+| POST·DELETE | `/api/pool/clear` | `/clear` | Throw the pool away |
+
+`/server` answers `text/plain`, one job id per line — what the Lua side parses
+with a single pattern match. Add `&format=json` for the full record.
+
+`max` is a preference, not a wall: if it leaves too few candidates the filter is
+relaxed rather than failing, because a server slightly fuller than asked for
+beats no server at all. The response says `relaxed: true` when that happened.
+
+Taking a job id **needs the key even though it is a GET** — it mutates the pool
+and spends a scarce resource. `PUBLIC_READ=true` opens the egg feed; it
+deliberately does not open the dispenser.
+
+```lua
+-- what a bot does
+local resp = request({ Url = HUB .. "/api/pool/server?size=1&max=3&key=" .. KEY,
+                       Method = "GET", Headers = { username = "bot_1" } })
+local jobId = resp.Body:match("[^\r\n]+")
+TeleportService:TeleportToPlaceInstance(game.PlaceId, jobId, LocalPlayer)
+
+-- teleport failed? drop it and get the next one in one round trip
+local r2 = request({ Url = HUB .. "/api/pool/remove?max=3&key=" .. KEY, Method = "POST",
+                     Headers = { username = "bot_1", ["Content-Type"] = "application/json" },
+                     Body = HttpService:JSONEncode({ jobid = jobId }) })
+local nextJobId = HttpService:JSONDecode(r2.Body).new_jobid
+```
+
+### Proxies
+
+`PROXIES` (comma or newline separated) wins over `PROXY_FILE`, and is the right
+place for them on Railway, where the filesystem is rebuilt from git on every
+deploy. `proxies.txt` is gitignored — proxy lines are credentials. Accepted per
+line:
+
+```
+user:pass@host:port        host:port:user:pass
+user:pass:host:port        http://user:pass@host:port        host:port
+```
+
+A line that cannot be parsed is dropped at load rather than failing later on
+every request that happens to draw it. With none configured the scraper still
+runs, but clamped to two workers and going out from this host's own IP, and it
+says so in the log — Roblox throttles that within seconds.
+
+---
+
+## The console
+
+Six views, reachable with keys `1`–`6`, `/` to focus the current view's search.
+
+| View | What it answers |
+|---|---|
+| **Overview** | Is the scrape healthy? Pool composition, request rate, throttle and concurrency meters, per-worker state, live tape |
+| **Eggs** | The filtered feed — rarity chips, weight, age, claim state |
+| **Pool** | Every job id, its population, whether it is fresh / ready / out (with a recycle countdown) |
+| **Servers** | Who is reporting, and their best egg |
+| **Clients** | Every reporter, auto joiner and pool client, what it has done, and whether it is still there |
+| **Logs** | The scraper's tape, filterable by level and text |
+
+The throttle and concurrency meters exist because the two failure modes look
+identical from outside: a climbing delay means Roblox is pushing back, while a
+queued-request count means the proxy-account limit is doing its job. The console
+says which.
+
+---
+
 ## API
 
 | Method | Route | Who | What it does |
@@ -279,6 +424,7 @@ it is needed most.
 | GET | `/api/meta` | Everyone | Stats, rarity ladder, `eggSeq` cursor |
 | GET | `/api/servers` | Dashboard | Servers in detail |
 | GET | `/api/events` | Dashboard | Timestamped activity log |
+| GET | `/api/clients` | Dashboard | Connected reporters, auto joiners and pool clients |
 | POST | `/api/diag` | AJ | Why a filter returns nothing |
 | GET | `/api/stream` | Dashboard | Live SSE |
 | POST | `/api/purge` | Admin | Wipe everything |

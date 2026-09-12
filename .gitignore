@@ -7,3 +7,8 @@ node_modules/
 !scripts/*.lua
 luac.out
 *.luac
+
+# Proxy lines are credentials. Keep them out of the repo entirely — on Railway
+# the filesystem is rebuilt from git every deploy, so they belong in the
+# PROXIES env var anyway.
+proxies.txt
