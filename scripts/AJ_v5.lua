@@ -15,9 +15,16 @@
          there. It survives the teleport.
      ───────────────────────────────────────────────────────────────────────── ]]
 
+-- The hub fills these in when it serves the script, so a fresh run needs no
+-- typing. They stay as the literal placeholders only if you loaded the file
+-- straight from the repo instead of from the hub.
+local HUB_URL_DEFAULT = "__SAE_HUB_URL__"
+local API_KEY_DEFAULT = "__SAE_API_KEY__"
+local function baked(v) return (not v:match("^__SAE_")) and v or "" end
+
 local CFG = {
-    HUB        = "https://TU-APP.up.railway.app",
-    KEY        = "TU-API-KEY",
+    HUB        = baked(HUB_URL_DEFAULT),
+    KEY        = baked(API_KEY_DEFAULT),
     CLIENT     = "sae-1",
     POLL       = 4,
     WAIT       = 20,
@@ -29,7 +36,6 @@ local CFG = {
                    "Eternal", "Divine", "Titan" },
     HAS_SLOT   = true,
     ONLY_NEW   = false,
-    SCRIPT_URL = "",
     _schema    = 3,
 }
 
@@ -142,7 +148,10 @@ local function load()
         local d = HS:JSONDecode(readfile(src))
         local schema = tonumber(d._schema) or 1
         for k, v in pairs(d) do
-            if CFG[k] ~= nil then CFG[k] = v end
+            -- A saved blank must not wipe what the hub baked in.
+            if CFG[k] ~= nil and not ((k == "HUB" or k == "KEY") and v == "") then
+                CFG[k] = v
+            end
         end
         if schema < 2 then CFG.ONLY_NEW = false; migrated = true end
         if schema < 3 then CFG._schema = 3; migrated = true end
@@ -553,9 +562,13 @@ local function doHop(target)
             }))
         end)
     end
+    -- Re-queue itself from the hub it is already pointing at, so there is no
+    -- separate script URL to keep in sync.
     local qt = queue_on_teleport or (syn and syn.queue_on_teleport)
-    if qt and CFG.SCRIPT_URL ~= "" then
-        pcall(qt, ('loadstring(game:HttpGet("%s"))()'):format(CFG.SCRIPT_URL))
+    local base = hubBase()
+    if qt and base ~= "" then
+        pcall(qt, ('loadstring(game:HttpGet("%s/script/joiner.lua?key=%s"))()')
+            :format(base, HS:UrlEncode(CFG.KEY)))
     end
 
     local placeId = tonumber(target.placeId) or game.PlaceId
@@ -1195,8 +1208,7 @@ field(pgConfig, "NAME OF THIS CLIENT", 336, 64, 192, CFG.CLIENT, function(v) CFG
 caption(pgConfig, "PACING", 2, 114, 220)
 field(pgConfig, "POLL (s)", 0, 130, 100, CFG.POLL, function(v) CFG.POLL = math.max(2, tonumber(v) or 4) end)
 field(pgConfig, "COOLDOWN (s)", 110, 130, 116, CFG.COOLDOWN, function(v) CFG.COOLDOWN = math.max(3, tonumber(v) or 8) end)
-field(pgConfig, "CLAIM WAIT (s)", 236, 130, 124, CFG.WAIT, function(v) CFG.WAIT = math.max(5, math.min(50, tonumber(v) or 20)) end)
-field(pgConfig, "RAW · auto reload", 370, 130, 158, CFG.SCRIPT_URL, function(v) CFG.SCRIPT_URL = v end)
+field(pgConfig, "CLAIM WAIT (s)", 236, 130, 190, CFG.WAIT, function(v) CFG.WAIT = math.max(5, math.min(50, tonumber(v) or 20)) end)
 
 do
     local test = mk("TextButton", {

@@ -62,9 +62,6 @@ local CFG = {
     ZONE_CONTAINER = "AreaEggSlotsClient",
     CONFIG_FILE    = "jf_reporter_v9.json",
     VISITED_FILE   = "jf_esp_visited.json",
-    -- RAW URL of this script. Without it the sweep dies on the first server:
-    -- the teleport kills the client and nothing starts the reporter again.
-    SCRIPT_URL     = "",
 
     -- Wait for the server to load, and THEN a single pass.
     -- No scanning is needed to know it has finished: the egg container fires
@@ -73,6 +70,8 @@ local CFG = {
     QUIET          = 2.5,   -- s with no new models = the server has loaded
     READY_TIMEOUT  = 60,    -- s at most waiting for that signal
     HEARTBEAT      = 120,   -- s between heartbeats that keep the report alive
+    SEND_TRIES     = 3,     -- a dropped report used to lose the whole server
+    SEND_RETRY     = 2,     -- s before retrying, multiplied by the attempt
 
     -- Auto hop is always on: reporting one server and stopping there is not
     -- useful, so there is no switch for it.
@@ -367,8 +366,16 @@ end
 ----------------------------------------------------------------------
 -- STATE
 ----------------------------------------------------------------------
+-- The hub fills these in when it serves the script, so a fresh run needs no
+-- typing at all. They stay as the literal placeholders only if you loaded the
+-- file straight from the repo instead of from the hub.
+local HUB_URL_DEFAULT = "__SAE_HUB_URL__"
+local API_KEY_DEFAULT = "__SAE_API_KEY__"
+local function baked(v) return (not v:match("^__SAE_")) and v or "" end
+
 local WH  = { url="", enabled=false, rarities={}, count=0, status="idle", queue={} }
-local HUB = { url="", key="", enabled=true, count=0, status="idle", lastMs=0 }
+local HUB = { url=baked(HUB_URL_DEFAULT), key=baked(API_KEY_DEFAULT),
+              enabled=true, count=0, status="idle", lastMs=0 }
 local HOP = { busy=false, busySince=0, hops=0, fails=0, visited={}, order={},
                pool={}, poolAt=0, status="idle" }
 
@@ -402,7 +409,7 @@ local function saveConfig()
         writefile(CFG.CONFIG_FILE, HttpService:JSONEncode({
             url = WH.url, enabled = WH.enabled, rarities = WH.rarities,
             hubUrl = HUB.url, hubKey = HUB.key, hubEnabled = HUB.enabled,
-            hopMax = CFG.HOP_MAXPLAYERS, scriptUrl = CFG.SCRIPT_URL,
+            hopMax = CFG.HOP_MAXPLAYERS,
         }))
     end)
 end
@@ -415,11 +422,11 @@ local function loadConfig()
         WH.url      = d.url or ""
         WH.enabled  = d.enabled or false
         WH.rarities = d.rarities or {}
-        HUB.url     = d.hubUrl or ""
-        HUB.key     = d.hubKey or ""
+        -- A saved blank must not wipe what the hub baked in.
+        if d.hubUrl and d.hubUrl ~= "" then HUB.url = d.hubUrl end
+        if d.hubKey and d.hubKey ~= "" then HUB.key = d.hubKey end
         if d.hubEnabled ~= nil then HUB.enabled = d.hubEnabled end
         CFG.HOP_MAXPLAYERS = tonumber(d.hopMax) or CFG.HOP_MAXPLAYERS
-        CFG.SCRIPT_URL = d.scriptUrl or CFG.SCRIPT_URL
     end)
 end
 loadConfig()
@@ -724,19 +731,53 @@ local function sendReport(eggs)
         eggs       = payload,
     })
 
-    local t0 = os.clock()
-    local ok, err = httpPost(hubBase() .. "/api/report", body, { ["x-eag-key"] = HUB.key })
-    HUB.lastMs = math.floor((os.clock() - t0) * 1000)
-    if ok then
-        HUB.count = HUB.count + #payload
-        HUB.status = string.format("%d eggs · %dms · %s", #payload, HUB.lastMs, os.date("%H:%M:%S"))
-        LAST.payload = payload
-        LAST.jobId = game.JobId
-        LAST.at = os.time()
-    else
-        HUB.status = "error: " .. tostring(err)
+    -- The send is not fire-and-forget. A single dropped request used to lose
+    -- the whole server silently, and nothing checked that the hub had actually
+    -- kept what was sent. Now it retries, and it reads back `stored` to
+    -- confirm the hub holds exactly as many eggs as went out.
+    local lastErr
+    for attempt = 1, CFG.SEND_TRIES do
+        local t0 = os.clock()
+        local ok, res = httpPost(hubBase() .. "/api/report", body, { ["x-eag-key"] = HUB.key })
+        HUB.lastMs = math.floor((os.clock() - t0) * 1000)
+
+        if ok then
+            local stored
+            pcall(function()
+                local d = HttpService:JSONDecode(res)
+                stored = tonumber(d and d.stored)
+            end)
+
+            if stored == nil then
+                -- Sent fine but the hub's answer was unreadable: treat it as
+                -- delivered rather than resending and risking a duplicate.
+                HUB.count = HUB.count + #payload
+                HUB.status = ("%d eggs · %dms · %s"):format(#payload, HUB.lastMs, os.date("%H:%M:%S"))
+            elseif stored < #payload then
+                lastErr = ("hub kept %d of %d"):format(stored, #payload)
+                HUB.status = ("%s · retry %d/%d"):format(lastErr, attempt, CFG.SEND_TRIES)
+                if attempt < CFG.SEND_TRIES then task.wait(CFG.SEND_RETRY * attempt) end
+                goto continue
+            else
+                HUB.count = HUB.count + #payload
+                HUB.status = ("%d eggs · stored %d ✓ · %dms · %s")
+                    :format(#payload, stored, HUB.lastMs, os.date("%H:%M:%S"))
+            end
+
+            LAST.payload = payload
+            LAST.jobId = game.JobId
+            LAST.at = os.time()
+            return true
+        end
+
+        lastErr = tostring(res)
+        HUB.status = ("error: %s · retry %d/%d"):format(lastErr, attempt, CFG.SEND_TRIES)
+        if attempt < CFG.SEND_TRIES then task.wait(CFG.SEND_RETRY * attempt) end
+        ::continue::
     end
-    return ok, err
+
+    HUB.status = "gave up: " .. tostring(lastErr)
+    return false, lastErr
 end
 
 -- Heartbeat. The hub forgets a server after SERVER_TTL_SEC without a signal
@@ -906,9 +947,14 @@ doHop = function()
     -- The teleport kills this client, so the reporter has to ask to be run
     -- again on arrival. Without this it reports ONE server and the sweep ends,
     -- which is the opposite of what auto hop is for.
+    -- The URL is derived from the hub you are already pointing at, so there is
+    -- nothing extra to configure.
     local qt = queue_on_teleport or (syn and syn.queue_on_teleport)
-    if qt and CFG.SCRIPT_URL ~= "" then
-        pcall(qt, ('loadstring(game:HttpGet("%s"))()'):format(CFG.SCRIPT_URL))
+    local base = hubBase()
+    if qt and base ~= "" then
+        local loader = ('loadstring(game:HttpGet("%s/script/reporter.lua?key=%s"))()')
+            :format(base, HttpService:UrlEncode(HUB.key))
+        pcall(qt, loader)
     end
 
     local ok, err = pcall(function()
@@ -1276,13 +1322,10 @@ do
         return b
     end
 
-    local hubUrlBox = fieldOn(pHub, "HUB URL", 0, "https://tu-app.up.railway.app", HUB.url,
+    local hubUrlBox = fieldOn(pHub, "HUB URL", 0, "filled in by the hub", HUB.url,
         function(v) HUB.url = (v:gsub("%s+",""):gsub("/+$","")) end)
-    local hubKeyBox = fieldOn(pHub, "API KEY", 50, "the same API_KEY as the hub", HUB.key,
+    local hubKeyBox = fieldOn(pHub, "API KEY", 50, "filled in by the hub", HUB.key,
         function(v) HUB.key = (v:gsub("%s+","")) end)
-    fieldOn(pHub, "RAW SCRIPT URL  ·  needed to keep sweeping after each hop", 100,
-        "https://raw.githubusercontent.com/.../ESP_v9.lua", CFG.SCRIPT_URL,
-        function(v) CFG.SCRIPT_URL = (v:gsub("%s+","")) end)
 
     local function toggleOn(parent2, y, get, set, text)
         local b = new("TextButton", {
@@ -1306,12 +1349,12 @@ do
         return b, paint
     end
 
-    toggleOn(pHub, 150, function() return HUB.enabled end,
+    toggleOn(pHub, 104, function() return HUB.enabled end,
         function(v) HUB.enabled = v end, "report to the hub")
 
 
     local testBtn = new("TextButton", {
-        Position = UDim2.new(0,0,0,186), Size = UDim2.new(0,140,0,28),
+        Position = UDim2.new(0,0,0,142), Size = UDim2.new(0,140,0,28),
         BackgroundColor3 = C.card2, BorderSizePixel = 0, Font = Enum.Font.GothamBold,
         TextSize = 10.5, TextColor3 = C.txt2, Text = "TEST CONNECTION", AutoButtonColor = false,
     }, pHub)
@@ -1332,7 +1375,7 @@ do
     end)
 
     local forgetBtn = new("TextButton", {
-        Position = UDim2.new(0,148,0,186), Size = UDim2.new(0,150,0,28),
+        Position = UDim2.new(0,148,0,142), Size = UDim2.new(0,150,0,28),
         BackgroundColor3 = C.card2, BorderSizePixel = 0, Font = Enum.Font.GothamBold,
         TextSize = 10.5, TextColor3 = C.txt2, Text = "FORGET VISITED", AutoButtonColor = false,
     }, pHub)

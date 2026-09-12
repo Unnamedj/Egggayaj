@@ -44,10 +44,28 @@ Locally:
 API_KEY=test node server.js   # http://localhost:3000
 ```
 
-## Configuring the scripts
+## Running the scripts
 
-In the **reporter** (HUB tab) and the **auto joiner** (SETTINGS tab), set the
-same `HUB_URL` and the same `API_KEY`.
+Nothing to configure. The hub serves both scripts with its own URL and key
+already filled in, so one loader line is the whole setup:
+
+```lua
+-- reporter
+loadstring(game:HttpGet("https://YOUR-HUB.up.railway.app/script/reporter.lua?key=YOUR_KEY"))()
+
+-- auto joiner
+loadstring(game:HttpGet("https://YOUR-HUB.up.railway.app/script/joiner.lua?key=YOUR_KEY"))()
+```
+
+`/script/` requires the key, like every write path — the copy it hands back
+carries the key in clear, so it must not be world-readable. The repo files hold
+only `__SAE_HUB_URL__` and `__SAE_API_KEY__` placeholders, which is why no real
+key is ever committed.
+
+That same URL is what the reporter re-queues on teleport, so the sweep keeps
+going with no separate "raw script URL" to keep in sync. Anything you type in
+the panel still overrides the baked-in values and is remembered; a blank saved
+value no longer wipes them.
 
 ---
 
@@ -83,9 +101,9 @@ fault is not the server.
 There is no switch. Reporting one server and stopping there is not useful, so
 the hop is simply the last step of the cycle.
 
-That makes one setting mandatory: **RAW SCRIPT URL**, under the HUB tab. The
-teleport kills the client, so the reporter has to queue itself to run again on
-arrival. Without it the sweep reports exactly one server and ends.
+The teleport kills the client, so the reporter queues itself to run again on
+arrival, loading from `<hub>/script/reporter.lua`. Without that the sweep would
+report exactly one server and end.
 
 The server search used to dead-end. It only looked at the first 8 pages and only
 accepted servers at or below the player cap, so once those were visited it
@@ -111,6 +129,20 @@ Four things changed:
   4,000 entries.
 
 Failures now back off (4s → 60s) instead of retrying at a flat 4s forever.
+
+### The send is checked, not assumed
+
+A dropped request used to lose a whole server silently, and nothing verified
+that the hub had kept what was sent. The reporter now retries up to three times
+and reads `stored` back to confirm the count matches:
+
+```
+the hub stores all 5          attempts=1  ok     5 eggs · stored 5 ✓
+fails twice, third succeeds   attempts=3  ok     5 eggs · stored 5 ✓
+hub only stored 3 of 5        attempts=3  fail   gave up: hub kept 3 of 5
+fails every time              attempts=3  fail   gave up: 500
+reply unreadable              attempts=1  ok     (not resent — would duplicate)
+```
 
 A heartbeat resends the identical payload every 2 minutes, because the hub
 forgets a server after `SERVER_TTL_SEC` without a signal. Same uids, so it

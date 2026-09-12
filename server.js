@@ -186,6 +186,49 @@ function serveStatic(req, res, pathname) {
   });
 }
 
+// ---------------------------------------------------------------- scripts
+// Serves the Lua scripts with HUB_URL and API_KEY already filled in, so the
+// user pastes one loader line and configures nothing. It is also what the
+// reporter re-queues on teleport, which is why there is no "raw script URL"
+// field to fill any more.
+//
+// The key is required to fetch it, exactly like every other write path: the
+// served copy carries the key in clear, so it must not be world-readable.
+const SCRIPTS = {
+  "reporter.lua": "ESP_v9.lua",
+  "joiner.lua": "AJ_v5.lua",
+};
+
+function serveScript(req, res, name, url) {
+  const file = SCRIPTS[name];
+  if (!file) return send(res, 404, { error: "unknown script" });
+
+  fs.readFile(path.join(__dirname, "scripts", file), "utf8", (err, src) => {
+    if (err) return send(res, 404, { error: "script not found" });
+
+    // Railway terminates TLS, so the scheme comes from the proxy header; with
+    // no proxy, ask the socket rather than assuming https and handing back a
+    // URL that does not resolve locally.
+    const fwd = (req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+    const proto = fwd || (req.socket && req.socket.encrypted ? "https" : "http");
+    const host = req.headers.host || "localhost";
+    const base = `${proto}://${host}`;
+
+    // Only the two placeholders are substituted, and the key is JSON-escaped
+    // so a quote in it cannot break out of the Lua string.
+    const body = src
+      .replace(/__SAE_HUB_URL__/g, base)
+      .replace(/__SAE_API_KEY__/g, JSON.stringify(API_KEY).slice(1, -1));
+
+    res.writeHead(200, {
+      "content-type": "text/plain; charset=utf-8",
+      "content-length": Buffer.byteLength(body),
+      "cache-control": "no-store",
+    });
+    res.end(body);
+  });
+}
+
 // ---------------------------------------------------------------- long poll
 const WAKE_ON = { eggs: 1, egg: 1, release: 1, purge: 1, gone: 1 };
 
@@ -263,6 +306,12 @@ const server = http.createServer(async (req, res) => {
 
   if (p === "/healthz" || p === "/health") {
     return send(res, 200, { ok: true, uptimeMs: Date.now() - store.stats.startedAt });
+  }
+
+  if (p.startsWith("/script/")) {
+    if (req.method !== "GET") return send(res, 405, { error: "method" });
+    if (!authed(req, url)) return send(res, 401, { error: "bad or missing key" });
+    return serveScript(req, res, p.slice("/script/".length), url);
   }
 
   if (!p.startsWith("/api/")) {
