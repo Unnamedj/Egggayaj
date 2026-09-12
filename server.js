@@ -682,8 +682,16 @@ server.listen(PORT, () => {
   else console.log("[EAG HUB] job-id pool disabled (FETCHER_ENABLED=0)");
 
   const d = discord.stats();
-  console.log(`[EAG HUB] discord: ${d.enabled ? d.routes.join(", ") : "no webhooks configured"}` +
-    (d.enabled ? ` · alert over ${d.insaneKg} kg` : ""));
+  if (d.enabled) {
+    console.log(`[EAG HUB] discord: ${d.routes.join(", ")} · alert over ${d.insaneKg} kg`);
+  } else if (!d.source.fileFound) {
+    // This exact hole shipped once: the file was in git but not in the image,
+    // so the relay was dead and nothing said why.
+    console.log(`[EAG HUB] discord: OFF — ${d.source.path} ${d.source.fileError}.` +
+      " If it exists in the repo, the Dockerfile is not copying it.");
+  } else {
+    console.log("[EAG HUB] discord: OFF — webhooks.json was read but holds no valid webhook URL");
+  }
   discord.start(() => Object.assign(store.snapshot(), { pool: pool.stats() }));
 });
 
