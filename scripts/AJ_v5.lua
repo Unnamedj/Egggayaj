@@ -2,17 +2,22 @@
      SAE · AUTO JOINER  v5   ·   by joszz
      Panel: Right Control (PC)  ·  floating button (mobile)
 
-     What is new in v5:
+     The interface is the same instrument panel as the hub's web console:
+     near-black ground, ONE amber accent, and colour reserved for state —
+     green alive, amber busy, red wrong. Numbers and job ids are monospace so
+     columns line up and an id can be read character by character. Radii stay
+     small; a tool that watches servers should look machined, not inflated.
 
-       · Rebuilt interface: sliding tab indicator, cards with depth, staggered
-         entries, press bounce.
-       · Works on mobile and PC: the panel scales itself to the viewport and a
-         draggable floating button opens it without a keyboard.
+     Why a left rail instead of the old top tabs: the readout belongs across
+     the top, where it can be read without opening anything, and a vertical
+     rail takes a fifth tab without shrinking the other four.
+
+     Behaviour that has not changed, and must not:
        · Stale finds ARE shown, tagged, but auto join will not go for them.
-         You can still join them yourself.
-       · "JOINING ..." banner on hop, visible even with the panel closed.
-       · On landing, the GUI shows IN THE SERVER with the egg that brought you
-         there. It survives the teleport.
+         You can still join them yourself with ▶.
+       · The hop banner lives outside the panel, so it shows even when closed.
+       · On landing, IN THE SERVER shows the egg that brought you here. It
+         survives the teleport through a file on disk.
      ───────────────────────────────────────────────────────────────────────── ]]
 
 -- The hub fills these in when it serves the script, so a fresh run needs no
@@ -54,27 +59,28 @@ local httpreq = (syn and syn.request) or (fluxus and fluxus.request)
 local IS_TOUCH = UIS.TouchEnabled and not UIS.KeyboardEnabled
 
 -- ─────────────────────────────────────────────────────────────────── palette
+-- The hub console's palette, to the byte. One product, one look.
 local C = {
-    bg     = Color3.fromRGB(11, 12, 18),
-    bg2    = Color3.fromRGB(16, 18, 26),
-    card   = Color3.fromRGB(23, 26, 37),
-    card2  = Color3.fromRGB(32, 36, 50),
-    line   = Color3.fromRGB(45, 50, 68),
-    txt    = Color3.fromRGB(237, 240, 248),
-    txt2   = Color3.fromRGB(166, 174, 193),
-    mut    = Color3.fromRGB(114, 123, 145),
-    acc    = Color3.fromRGB(129, 97, 255),
-    acc2   = Color3.fromRGB(46, 216, 240),
-    ok     = Color3.fromRGB(54, 214, 156),
-    bad    = Color3.fromRGB(252, 98, 122),
-    warn   = Color3.fromRGB(252, 194, 40),
-    ink    = Color3.fromRGB(10, 12, 18),
+    bg     = Color3.fromRGB(10, 11, 13),
+    panel  = Color3.fromRGB(16, 18, 22),
+    raise  = Color3.fromRGB(21, 24, 30),
+    line   = Color3.fromRGB(31, 36, 45),
+    line2  = Color3.fromRGB(42, 49, 60),
+    txt    = Color3.fromRGB(233, 236, 241),
+    dim    = Color3.fromRGB(147, 156, 171),
+    faint  = Color3.fromRGB(95, 104, 117),
+    amber  = Color3.fromRGB(240, 160, 42),
+    green  = Color3.fromRGB(78, 201, 160),
+    cyan   = Color3.fromRGB(85, 185, 224),
+    red    = Color3.fromRGB(239, 95, 86),
+    ink    = Color3.fromRGB(10, 11, 13),
     white  = Color3.fromRGB(255, 255, 255),
 }
+local MONO = Enum.Font.Code
 
 local function hex(h)
     h = tostring(h or ""):gsub("#", "")
-    if #h ~= 6 then return C.mut end
+    if #h ~= 6 then return C.faint end
     return Color3.fromRGB(
         tonumber(h:sub(1,2),16) or 120,
         tonumber(h:sub(3,4),16) or 120,
@@ -109,6 +115,7 @@ local ST = {
     hops       = 0, fails = 0,
     lastHop    = 0, latency = -1,
     eggSeq     = 0, cursor = nil,
+    pool       = nil,   -- job ids the hub has scraped, for the readout
     ladder     = FALLBACK_LADDER, ladderFrom = "local",
     colors     = {},
     candidates = {},
@@ -120,7 +127,7 @@ local ST = {
 }
 local autoOn = false
 
-local function rc(r) return ST.colors[tostring(r):lower()] or C.mut end
+local function rc(r) return ST.colors[tostring(r):lower()] or C.faint end
 
 local function applyLadder(rows, from)
     ST.ladder, ST.ladderFrom, ST.colors = rows, from, {}
@@ -214,7 +221,7 @@ local function mk(class, props, parent)
     if parent then o.Parent = parent end
     return o
 end
-local function corner(o, r) mk("UICorner", { CornerRadius = UDim.new(0, r or 10) }, o) end
+local function corner(o, r) mk("UICorner", { CornerRadius = UDim.new(0, r or 4) }, o) end
 local function round(o)     mk("UICorner", { CornerRadius = UDim.new(1, 0) }, o) end
 local function stroke(o, col, tr, th)
     return mk("UIStroke", { Color = col or C.line, Transparency = tr or 0, Thickness = th or 1 }, o)
@@ -225,15 +232,20 @@ local function pad(o, l, r, t, b)
         PaddingTop = UDim.new(0, t or 0), PaddingBottom = UDim.new(0, b or 0),
     }, o)
 end
-local function grad(o, rot, a, b)
-    return mk("UIGradient", { Rotation = rot or 0, Color = ColorSequence.new(a, b) }, o)
+-- A 1px rule. Used instead of borders so a panel can be divided without
+-- boxing every region in.
+local function rule(parent, x, y, w, h, col)
+    return mk("Frame", {
+        Position = UDim2.new(0,x,0,y), Size = UDim2.new(w[1], w[2], h[1], h[2]),
+        BackgroundColor3 = col or C.line, BorderSizePixel = 0,
+    }, parent)
 end
 
 local EASE = {
-    out  = TweenInfo.new(0.22, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
-    fast = TweenInfo.new(0.13, Enum.EasingStyle.Quad,  Enum.EasingDirection.Out),
-    back = TweenInfo.new(0.42, Enum.EasingStyle.Back,  Enum.EasingDirection.Out),
-    soft = TweenInfo.new(0.32, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+    out  = TweenInfo.new(0.20, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+    fast = TweenInfo.new(0.12, Enum.EasingStyle.Quad,  Enum.EasingDirection.Out),
+    back = TweenInfo.new(0.34, Enum.EasingStyle.Back,  Enum.EasingDirection.Out),
+    soft = TweenInfo.new(0.30, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
 }
 local function tw(obj, info, props)
     local t = TS:Create(obj, info or EASE.out, props)
@@ -244,7 +256,7 @@ end
 -- Press bounce. Gives a tactile feel, which matters most on mobile.
 local function pressable(btn, scaleDown)
     local s = mk("UIScale", { Scale = 1 }, btn)
-    local down = scaleDown or 0.94
+    local down = scaleDown or 0.95
     local function press() tw(s, EASE.fast, { Scale = down }) end
     local function release() tw(s, EASE.back, { Scale = 1 }) end
     btn.MouseButton1Down:Connect(press)
@@ -258,14 +270,16 @@ local function label(parent, text, x, y, w, h, size, col, font)
     return mk("TextLabel", {
         Position = UDim2.new(0,x,0,y), Size = UDim2.new(0,w,0,h),
         BackgroundTransparency = 1, Font = font or Enum.Font.Gotham, TextSize = size or 12,
-        TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = col or C.txt2, Text = text,
+        TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = col or C.dim, Text = text,
     }, parent)
 end
+-- Micro-caps. Chrome, not content: small, faint, always upper case.
 local function caption(parent, text, x, y, w)
     return mk("TextLabel", {
         Position = UDim2.new(0,x,0,y), Size = UDim2.new(0,w,0,13),
-        BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 9.5,
-        TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = C.mut, Text = text,
+        BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 9,
+        TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = C.faint,
+        Text = tostring(text):upper(),
     }, parent)
 end
 
@@ -276,6 +290,12 @@ local function ago(ms)
     return math.floor(s/3600) .. "h " .. math.floor((s % 3600)/60) .. "m"
 end
 
+local function shortId(id)
+    local s = tostring(id or "")
+    if #s <= 13 then return s end
+    return s:sub(1, 13) .. "…"
+end
+
 -- ─────────────────────────────────────────────────────────────────────── root
 local gui = mk("ScreenGui", {
     Name = "SAE_AJ", ResetOnSpawn = false, IgnoreGuiInset = true,
@@ -283,16 +303,23 @@ local gui = mk("ScreenGui", {
 })
 gui.Parent = (gethui and gethui()) or LP:WaitForChild("PlayerGui")
 
-local W, H = 560, 424
+-- 632 wide is not arbitrary: minus the 76px rail and 12px gutters it leaves
+-- pages exactly 532 wide, which is what they were before the rail existed, so
+-- the FILTERS and SETTINGS layouts did not have to be re-measured.
+local W, H = 632, 440
+local HEADER_H, RAIL_W = 52, 76
+local PAGE_X = RAIL_W + 12
+local PAGE_W = W - PAGE_X - 12
+local PAGE_Y = HEADER_H + 12
+
 local root = mk("Frame", {
     Size = UDim2.new(0, W, 0, H),
     Position = UDim2.new(0.5, -W/2, 0.5, -H/2),
     BackgroundColor3 = C.bg, BorderSizePixel = 0,
     Active = true, Draggable = true,
 }, gui)
-corner(root, 16)
-stroke(root, C.line, 0.2)
-grad(root, 125, Color3.fromRGB(26, 22, 46), Color3.fromRGB(10, 11, 17))
+corner(root, 6)
+stroke(root, C.line, 0)
 
 -- The panel shrinks to fit any screen, mobile included, without having to
 -- maintain two separate layouts.
@@ -303,7 +330,7 @@ local function fitViewport()
     local vp = cam.ViewportSize
     if vp.X < 10 then return end
     local s = math.min(1, (vp.X - 20) / W, (vp.Y - 20) / H)
-    uiScale.Scale = math.max(0.55, s)
+    uiScale.Scale = math.max(0.5, s)
 end
 fitViewport()
 task.spawn(function()
@@ -312,46 +339,33 @@ task.spawn(function()
 end)
 
 -- ── header ────────────────────────────────────────────────────────────────
-local header = mk("Frame", { Size = UDim2.new(1,0,0,48), BackgroundTransparency = 1 }, root)
-mk("Frame", {
-    Position = UDim2.new(0,0,1,-1), Size = UDim2.new(1,0,0,1),
-    BackgroundColor3 = C.line, BorderSizePixel = 0, BackgroundTransparency = 0.4,
-}, header)
+local header = mk("Frame", { Size = UDim2.new(1,0,0,HEADER_H), BackgroundTransparency = 1 }, root)
+rule(header, 0, HEADER_H - 1, {1,0}, {0,1})
 
-do
-    local badge = mk("Frame", {
-        Position = UDim2.new(0,16,0,14), Size = UDim2.new(0,22,0,22),
-        BackgroundColor3 = C.acc, BorderSizePixel = 0,
-    }, header)
-    corner(badge, 7)
-    grad(badge, 130, C.acc, C.acc2)
-    mk("TextLabel", {
-        Size = UDim2.new(1,0,1,0), BackgroundTransparency = 1,
-        Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = C.ink, Text = "S",
-    }, badge)
-end
+label(header, "SAE·AJ", 16, 11, 90, 14, 12.5, C.txt, Enum.Font.GothamBold)
+local subLbl = label(header, "connecting to the hub", 16, 27, 210, 12, 10, C.faint, MONO)
 
-label(header, "SAE", 46, 9, 34, 16, 14, C.acc2, Enum.Font.GothamBold)
-label(header, "AUTO JOINER", 80, 9, 170, 16, 14, C.txt, Enum.Font.GothamBold)
-local subLbl = label(header, "connecting to the hub", 46, 26, 300, 13, 10.5, C.mut)
-
+-- connection pill
+-- Just the state. The egg count used to live here too and did not fit in the
+-- pill; it is a number, so it belongs in the readout with the other numbers.
 local connPill = mk("Frame", {
-    Position = UDim2.new(1,-190,0,14), Size = UDim2.new(0,142,0,22),
-    BackgroundColor3 = C.card, BorderSizePixel = 0,
+    Position = UDim2.new(0,232,0,15), Size = UDim2.new(0,74,0,22),
+    BackgroundTransparency = 1, BorderSizePixel = 0,
 }, header)
-round(connPill); stroke(connPill, C.line, 0.35)
+corner(connPill, 3)
+local connStroke = stroke(connPill, C.line, 0)
 local connDot = mk("Frame", {
-    Position = UDim2.new(0,10,0,8), Size = UDim2.new(0,6,0,6),
-    BackgroundColor3 = C.warn, BorderSizePixel = 0,
+    Position = UDim2.new(0,9,0,8), Size = UDim2.new(0,6,0,6),
+    BackgroundColor3 = C.amber, BorderSizePixel = 0,
 }, connPill)
 round(connDot)
 local connLbl = mk("TextLabel", {
-    Position = UDim2.new(0,22,0,0), Size = UDim2.new(1,-28,1,0),
-    BackgroundTransparency = 1, Font = Enum.Font.GothamMedium, TextSize = 10.5,
-    TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = C.txt2, Text = "connecting",
+    Position = UDim2.new(0,21,0,0), Size = UDim2.new(1,-27,1,0),
+    BackgroundTransparency = 1, Font = MONO, TextSize = 10,
+    TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = C.dim, Text = "connecting",
 }, connPill)
 
--- Connection dot heartbeat: reads as alive and costs nothing.
+-- Heartbeat on the dot: reads as alive and costs nothing.
 task.spawn(function()
     while connDot.Parent do
         tw(connDot, TweenInfo.new(0.85, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
@@ -363,45 +377,60 @@ task.spawn(function()
     end
 end)
 
+-- Readout. The numbers that matter, always visible, never behind a tab.
+local readout = {}
+do
+    -- The same four the web console leads with. TARGETS is not among them
+    -- because the list header already says "N FRESH OF M" right above it.
+    local specs = { {"servers","SERVERS"}, {"eggs","EGGS"}, {"hops","HOPS"}, {"pool","POOL"} }
+    -- 60 per column is what fits between the connection pill and the close
+    -- button without either of them being overlapped.
+    local cw = 60
+    local x0 = W - 40 - (#specs * cw)
+    for i, spec in ipairs(specs) do
+        local x = x0 + (i - 1) * cw
+        if i > 1 then rule(header, x, 13, {0,1}, {0,26}) end
+        readout[spec[1]] = mk("TextLabel", {
+            Position = UDim2.new(0,x,0,10), Size = UDim2.new(0,cw-10,0,16),
+            BackgroundTransparency = 1, Font = MONO, TextSize = 14,
+            TextXAlignment = Enum.TextXAlignment.Right, TextColor3 = C.txt, Text = "—",
+        }, header)
+        mk("TextLabel", {
+            Position = UDim2.new(0,x,0,28), Size = UDim2.new(0,cw-10,0,10),
+            BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 8,
+            TextXAlignment = Enum.TextXAlignment.Right, TextColor3 = C.faint, Text = spec[2],
+        }, header)
+    end
+end
+
 do
     local close = mk("TextButton", {
-        Position = UDim2.new(1,-40,0,14), Size = UDim2.new(0,22,0,22),
-        BackgroundColor3 = C.card, BorderSizePixel = 0, Text = "✕",
-        Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = C.mut, AutoButtonColor = false,
+        Position = UDim2.new(1,-34,0,15), Size = UDim2.new(0,22,0,22),
+        BackgroundTransparency = 1, BorderSizePixel = 0, Text = "✕",
+        Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = C.faint, AutoButtonColor = false,
     }, header)
-    corner(close, 7); stroke(close, C.line, 0.35)
+    corner(close, 3); stroke(close, C.line, 0)
     pressable(close)
-    close.MouseEnter:Connect(function() tw(close, EASE.fast, { BackgroundColor3 = C.card2 }) end)
-    close.MouseLeave:Connect(function() tw(close, EASE.fast, { BackgroundColor3 = C.card }) end)
+    close.MouseEnter:Connect(function() tw(close, EASE.fast, { TextColor3 = C.red }) end)
+    close.MouseLeave:Connect(function() tw(close, EASE.fast, { TextColor3 = C.faint }) end)
     close.MouseButton1Click:Connect(function()
-        tw(root, EASE.fast, { BackgroundTransparency = 1 })
-        tw(uiScale, EASE.fast, { Scale = uiScale.Scale * 0.94 })
-        task.wait(0.13)
+        tw(uiScale, EASE.fast, { Scale = uiScale.Scale * 0.95 })
+        task.wait(0.12)
         root.Visible = false
-        root.BackgroundTransparency = 0
         fitViewport()
     end)
 end
 
--- ── tabs with a sliding indicator ─────────────────────────────────────────
-local TAB_W, TAB_GAP = 126, 4
-local tabBar = mk("Frame", {
-    Position = UDim2.new(0,14,0,58), Size = UDim2.new(1,-28,0,32),
-    BackgroundColor3 = C.bg2, BorderSizePixel = 0,
+-- ── rail ──────────────────────────────────────────────────────────────────
+local rail = mk("Frame", {
+    Position = UDim2.new(0,0,0,HEADER_H), Size = UDim2.new(0,RAIL_W,1,-HEADER_H),
+    BackgroundTransparency = 1, BorderSizePixel = 0,
 }, root)
-corner(tabBar, 10)
-stroke(tabBar, C.line, 0.55)
-
-local tabGlide = mk("Frame", {
-    Position = UDim2.new(0,3,0,3), Size = UDim2.new(0,TAB_W,0,26),
-    BackgroundColor3 = C.card2, BorderSizePixel = 0,
-}, tabBar)
-corner(tabGlide, 8)
-grad(tabGlide, 90, C.card2, Color3.fromRGB(40, 45, 62))
+rule(rail, RAIL_W - 1, 0, {0,1}, {1,0})
 
 local function newPage()
     return mk("Frame", {
-        Position = UDim2.new(0,14,0,100), Size = UDim2.new(1,-28,1,-114),
+        Position = UDim2.new(0,PAGE_X,0,PAGE_Y), Size = UDim2.new(0,PAGE_W,1,-(PAGE_Y+12)),
         BackgroundTransparency = 1, Visible = false,
     }, root)
 end
@@ -409,46 +438,62 @@ local pgHunt, pgFilter, pgConfig, pgLog = newPage(), newPage(), newPage(), newPa
 local pages = { hunt = pgHunt, filter = pgFilter, config = pgConfig, log = pgLog }
 local order = { "hunt", "filter", "config", "log" }
 
-local tabBtns, selectTab = {}, nil
-local function mkTab(i, key, text, tip)
-    local x = 3 + (i - 1) * (TAB_W + TAB_GAP)
+local NAV_H, NAV_Y0 = 40, 12
+-- A hard amber edge marks the active section. It reads instantly in
+-- peripheral vision, which is how a nav rail actually gets used.
+local navMark = mk("Frame", {
+    Position = UDim2.new(0,0,0,NAV_Y0+6), Size = UDim2.new(0,2,0,NAV_H-12),
+    BackgroundColor3 = C.amber, BorderSizePixel = 0,
+}, rail)
+
+local navBtns, navNums, navLbls, selectTab = {}, {}, {}, nil
+local function mkNav(i, key, text, tip)
+    local y = NAV_Y0 + (i - 1) * NAV_H
     local b = mk("TextButton", {
-        Position = UDim2.new(0,x,0,3), Size = UDim2.new(0,TAB_W,0,26),
-        BackgroundTransparency = 1, BorderSizePixel = 0,
-        Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = C.mut,
-        Text = text, AutoButtonColor = false,
-    }, tabBar)
-    tabBtns[key] = b
+        Position = UDim2.new(0,8,0,y), Size = UDim2.new(0,RAIL_W-17,0,NAV_H-4),
+        BackgroundColor3 = C.raise, BackgroundTransparency = 1,
+        BorderSizePixel = 0, Text = "", AutoButtonColor = false,
+    }, rail)
+    corner(b, 3)
+    navBtns[key] = b
+    navNums[key] = label(b, tostring(i), 8, 5, 16, 10, 8.5, C.line2, MONO)
+    navLbls[key] = label(b, text, 8, 16, RAIL_W-30, 13, 10.5, C.faint, Enum.Font.GothamBold)
     b.MouseButton1Click:Connect(function() selectTab(key) end)
     b.MouseEnter:Connect(function()
-        if b.TextColor3 ~= C.txt then tw(b, EASE.fast, { TextColor3 = C.txt2 }) end
         subLbl.Text = tip
+        if navLbls[key].TextColor3 ~= C.txt then
+            tw(b, EASE.fast, { BackgroundTransparency = 0.55 })
+        end
     end)
     b.MouseLeave:Connect(function()
-        if b.TextColor3 ~= C.txt then tw(b, EASE.fast, { TextColor3 = C.mut }) end
+        if navLbls[key].TextColor3 ~= C.txt then
+            tw(b, EASE.fast, { BackgroundTransparency = 1 })
+        end
     end)
     return b
 end
-mkTab(1, "hunt",   "HUNT",    "live targets and auto join")
-mkTab(2, "filter", "FILTERS", "rarity, weight and freshness")
-mkTab(3, "config", "SETTINGS", "hub connection and pacing")
-mkTab(4, "log",    "LOG",     "activity log")
+mkNav(1, "hunt",   "Hunt",     "live targets and auto join")
+mkNav(2, "filter", "Filters",  "rarity, weight and freshness")
+mkNav(3, "config", "Config",   "hub connection and pacing")
+mkNav(4, "log",    "Log",      "activity log")
 
 selectTab = function(key)
     for i, k in ipairs(order) do
         local on = (k == key)
         local p = pages[k]
         if on then
-            tw(tabGlide, EASE.out, {
-                Position = UDim2.new(0, 3 + (i - 1) * (TAB_W + TAB_GAP), 0, 3),
+            tw(navMark, EASE.out, {
+                Position = UDim2.new(0, 0, 0, NAV_Y0 + (i - 1) * NAV_H + 6),
             })
             p.Visible = true
-            p.Position = UDim2.new(0, 14, 0, 108)
-            tw(p, EASE.out, { Position = UDim2.new(0, 14, 0, 100) })
+            p.Position = UDim2.new(0, PAGE_X, 0, PAGE_Y + 6)
+            tw(p, EASE.out, { Position = UDim2.new(0, PAGE_X, 0, PAGE_Y) })
         else
             p.Visible = false
         end
-        tw(tabBtns[k], EASE.fast, { TextColor3 = on and C.txt or C.mut })
+        tw(navBtns[k], EASE.fast, { BackgroundTransparency = on and 0 or 1 })
+        tw(navLbls[k], EASE.fast, { TextColor3 = on and C.txt or C.faint })
+        tw(navNums[k], EASE.fast, { TextColor3 = on and C.amber or C.line2 })
     end
 end
 
@@ -457,32 +502,30 @@ end
 local banner = mk("Frame", {
     AnchorPoint = Vector2.new(0.5, 0),
     Position = UDim2.new(0.5, 0, 0, -80),
-    Size = UDim2.new(0, 340, 0, 58),
-    BackgroundColor3 = C.card, BorderSizePixel = 0, Visible = false,
+    Size = UDim2.new(0, 320, 0, 54),
+    BackgroundColor3 = C.panel, BorderSizePixel = 0, Visible = false,
 }, gui)
-corner(banner, 13)
-local bannerStroke = stroke(banner, C.acc, 0.35, 1.4)
-grad(banner, 100, Color3.fromRGB(30, 26, 52), Color3.fromRGB(18, 20, 30))
+corner(banner, 5)
+local bannerStroke = stroke(banner, C.amber, 0.3, 1)
 local bannerScale = mk("UIScale", { Scale = 1 }, banner)
 
 local bannerBar = mk("Frame", {
-    Position = UDim2.new(0,0,0,12), Size = UDim2.new(0,4,1,-24),
-    BackgroundColor3 = C.acc, BorderSizePixel = 0,
+    Position = UDim2.new(0,0,0,0), Size = UDim2.new(0,3,1,0),
+    BackgroundColor3 = C.amber, BorderSizePixel = 0,
 }, banner)
-corner(bannerBar, 2)
-local bannerTitle = label(banner, "JOINING", 16, 10, 200, 13, 9.5, C.acc2, Enum.Font.GothamBold)
-local bannerName  = label(banner, "", 16, 25, 250, 18, 14, C.txt, Enum.Font.GothamBold)
+label(banner, "JOINING", 16, 9, 200, 12, 9, C.amber, Enum.Font.GothamBold)
+local bannerName  = label(banner, "", 16, 23, 200, 18, 13.5, C.txt, Enum.Font.GothamBold)
 bannerName.TextTruncate = Enum.TextTruncate.AtEnd
 local bannerTag = mk("TextLabel", {
-    Position = UDim2.new(1,-100,0,20), Size = UDim2.new(0,84,0,20),
-    BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 11,
-    TextXAlignment = Enum.TextXAlignment.Right, TextColor3 = C.mut, Text = "",
+    Position = UDim2.new(1,-108,0,18), Size = UDim2.new(0,94,0,20),
+    BackgroundTransparency = 1, Font = MONO, TextSize = 11,
+    TextXAlignment = Enum.TextXAlignment.Right, TextColor3 = C.faint, Text = "",
 }, banner)
 
--- A progress bar that drains: signals the teleport is under way.
+-- A bar that drains: signals the teleport is under way.
 local bannerProg = mk("Frame", {
-    Position = UDim2.new(0,0,1,-3), Size = UDim2.new(1,0,0,3),
-    BackgroundColor3 = C.acc, BorderSizePixel = 0, BackgroundTransparency = 0.25,
+    Position = UDim2.new(0,0,1,-2), Size = UDim2.new(1,0,0,2),
+    BackgroundColor3 = C.amber, BorderSizePixel = 0,
 }, banner)
 
 local bannerToken = 0
@@ -502,17 +545,17 @@ local function showBanner(target)
 
     banner.Visible = true
     banner.Position = UDim2.new(0.5, 0, 0, -80)
-    bannerScale.Scale = 0.92
-    bannerProg.Size = UDim2.new(1, 0, 0, 3)
+    bannerScale.Scale = 0.94
+    bannerProg.Size = UDim2.new(1, 0, 0, 2)
     tw(banner, EASE.back, { Position = UDim2.new(0.5, 0, 0, 14) })
     tw(bannerScale, EASE.back, { Scale = 1 })
-    tw(bannerProg, TweenInfo.new(4.2, Enum.EasingStyle.Linear), { Size = UDim2.new(0, 0, 0, 3) })
+    tw(bannerProg, TweenInfo.new(4.2, Enum.EasingStyle.Linear), { Size = UDim2.new(0, 0, 0, 2) })
 
     task.delay(4.4, function()
         if bannerToken ~= myToken then return end
         tw(banner, EASE.soft, { Position = UDim2.new(0.5, 0, 0, -80) })
-        tw(bannerScale, EASE.soft, { Scale = 0.92 })
-        task.wait(0.34)
+        tw(bannerScale, EASE.soft, { Scale = 0.94 })
+        task.wait(0.32)
         if bannerToken == myToken then banner.Visible = false end
     end)
 end
@@ -520,7 +563,7 @@ end
 -- ───────────────────────────────────────────────────────────────────────── log
 local logList, renderLog
 local function pushLog(txt, col)
-    table.insert(ST.logs, 1, { t = os.date("%H:%M:%S"), s = txt, c = col or C.mut })
+    table.insert(ST.logs, 1, { t = os.date("%H:%M:%S"), s = txt, c = col or C.faint })
     if #ST.logs > 120 then table.remove(ST.logs) end
     print("[SAE-AJ]", txt)
     if renderLog then renderLog() end
@@ -539,7 +582,7 @@ local paintInServer
 local function doHop(target)
     if not target or not target.jobId then return end
     if target.jobId == game.JobId then
-        pushLog("you are already on that server", C.warn)
+        pushLog("you are already on that server", C.amber)
         return
     end
     ST.lastHop = os.clock()
@@ -549,7 +592,7 @@ local function doHop(target)
     showBanner(target)
     pushLog(("hop -> %s · %s %s kg"):format(
         tostring(target.name), tostring(target.rarity),
-        tostring(math.floor(tonumber(target.kg) or 0))), C.acc2)
+        tostring(math.floor(tonumber(target.kg) or 0))), C.cyan)
 
     -- The whole egg is stored, not just the jobId: on landing the GUI needs to
     -- know WHY it came here in order to show IN THE SERVER.
@@ -577,14 +620,14 @@ local function doHop(target)
     end)
     if not ok then
         ST.fails = ST.fails + 1
-        pushLog("teleport failed: " .. tostring(err), C.bad)
+        pushLog("teleport failed: " .. tostring(err), C.red)
         reportHop(target.jobId, false, tostring(err))
     end
 end
 
 TPS.TeleportInitFailed:Connect(function(_, result, msg)
     ST.fails = ST.fails + 1
-    pushLog("teleport rejected: " .. tostring(msg), C.bad)
+    pushLog("teleport rejected: " .. tostring(msg), C.red)
     if canFile and isfile(PENDING) then
         pcall(function()
             local t = HS:JSONDecode(readfile(PENDING))
@@ -597,139 +640,111 @@ end)
 -- ═══════════════════════════════════════════════════════════════════════ HUNT
 -- IN THE SERVER: the egg that landed us here.
 local inCard = mk("Frame", {
-    Size = UDim2.new(1,0,0,46), BackgroundColor3 = C.card,
+    Size = UDim2.new(1,0,0,42), BackgroundColor3 = C.panel,
     BorderSizePixel = 0, Visible = false,
 }, pgHunt)
-corner(inCard, 11)
-local inStroke = stroke(inCard, C.ok, 0.5)
-grad(inCard, 90, Color3.fromRGB(24, 34, 32), Color3.fromRGB(22, 25, 35))
+corner(inCard, 4)
+local inStroke = stroke(inCard, C.green, 0.4)
 local inBar = mk("Frame", {
-    Position = UDim2.new(0,0,0,10), Size = UDim2.new(0,3,1,-20),
-    BackgroundColor3 = C.ok, BorderSizePixel = 0,
+    Position = UDim2.new(0,0,0,0), Size = UDim2.new(0,3,1,0),
+    BackgroundColor3 = C.green, BorderSizePixel = 0,
 }, inCard)
-local inTitle = label(inCard, "IN THE SERVER", 14, 8, 160, 13, 9.5, C.ok, Enum.Font.GothamBold)
-local inName  = label(inCard, "", 14, 23, 300, 15, 12.5, C.txt, Enum.Font.GothamMedium)
+local inTitle = label(inCard, "IN THE SERVER", 14, 7, 160, 12, 9, C.green, Enum.Font.GothamBold)
+local inName  = label(inCard, "", 14, 21, 300, 15, 12.5, C.txt, Enum.Font.GothamMedium)
 inName.TextTruncate = Enum.TextTruncate.AtEnd
 local inTag = mk("TextLabel", {
-    Position = UDim2.new(1,-150,0,14), Size = UDim2.new(0,138,0,18),
-    BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 11,
-    TextXAlignment = Enum.TextXAlignment.Right, TextColor3 = C.mut, Text = "",
+    Position = UDim2.new(1,-158,0,12), Size = UDim2.new(0,146,0,18),
+    BackgroundTransparency = 1, Font = MONO, TextSize = 11,
+    TextXAlignment = Enum.TextXAlignment.Right, TextColor3 = C.faint, Text = "",
 }, inCard)
 
--- top row: switch + counters
-local topRow = mk("Frame", { Size = UDim2.new(1,0,0,62), BackgroundTransparency = 1 }, pgHunt)
+-- auto join switch
+local topRow = mk("Frame", { Size = UDim2.new(1,0,0,48), BackgroundTransparency = 1 }, pgHunt)
 
 local autoCard = mk("Frame", {
-    Size = UDim2.new(0,240,0,62), BackgroundColor3 = C.card, BorderSizePixel = 0,
+    Size = UDim2.new(1,0,0,48), BackgroundColor3 = C.panel, BorderSizePixel = 0,
 }, topRow)
-corner(autoCard, 12)
-local autoStroke = stroke(autoCard, C.line, 0.5)
-label(autoCard, "AUTO JOIN", 15, 12, 170, 14, 11, C.txt, Enum.Font.GothamBold)
+corner(autoCard, 4)
+local autoStroke = stroke(autoCard, C.line, 0)
+label(autoCard, "AUTO JOIN", 14, 10, 170, 13, 10, C.txt, Enum.Font.GothamBold)
 local autoSub = mk("TextLabel", {
-    Position = UDim2.new(0,15,0,29), Size = UDim2.new(0,150,0,24),
-    BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10.5,
-    TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
-    TextColor3 = C.mut, TextWrapped = true, Text = "paused",
+    Position = UDim2.new(0,14,0,26), Size = UDim2.new(1,-90,0,14),
+    BackgroundTransparency = 1, Font = MONO, TextSize = 10,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextColor3 = C.faint, TextTruncate = Enum.TextTruncate.AtEnd, Text = "paused",
 }, autoCard)
 
 local sw = mk("TextButton", {
-    Position = UDim2.new(1,-66,0,19), Size = UDim2.new(0,50,0,25),
-    BackgroundColor3 = C.card2, BorderSizePixel = 0, Text = "", AutoButtonColor = false,
+    Position = UDim2.new(1,-62,0,13), Size = UDim2.new(0,48,0,22),
+    BackgroundColor3 = C.raise, BorderSizePixel = 0, Text = "", AutoButtonColor = false,
 }, autoCard)
-round(sw)
-local swStroke = stroke(sw, C.line, 0.35)
+corner(sw, 3)
+local swStroke = stroke(sw, C.line, 0)
 local knob = mk("Frame", {
-    Position = UDim2.new(0,3,0,3), Size = UDim2.new(0,19,0,19),
-    BackgroundColor3 = C.mut, BorderSizePixel = 0,
+    Position = UDim2.new(0,3,0,3), Size = UDim2.new(0,16,0,16),
+    BackgroundColor3 = C.faint, BorderSizePixel = 0,
 }, sw)
-round(knob)
-local knobGlow = stroke(knob, C.ok, 1, 2)
+corner(knob, 2)
 
 local function paintAuto()
     tw(knob, EASE.back, {
-        Position = autoOn and UDim2.new(0,28,0,3) or UDim2.new(0,3,0,3),
-        BackgroundColor3 = autoOn and C.ink or C.mut,
+        Position = autoOn and UDim2.new(0,29,0,3) or UDim2.new(0,3,0,3),
+        BackgroundColor3 = autoOn and C.ink or C.faint,
     })
-    tw(sw, EASE.out, { BackgroundColor3 = autoOn and C.ok or C.card2 })
-    tw(autoStroke, EASE.out, {
-        Color = autoOn and C.ok or C.line, Transparency = autoOn and 0.5 or 0.5,
-    })
-    tw(knobGlow, EASE.out, { Transparency = autoOn and 0.4 or 1 })
-    swStroke.Transparency = autoOn and 1 or 0.35
+    tw(sw, EASE.out, { BackgroundColor3 = autoOn and C.green or C.raise })
+    tw(autoStroke, EASE.out, { Color = autoOn and C.green or C.line, Transparency = autoOn and 0.5 or 0 })
+    swStroke.Transparency = autoOn and 1 or 0
     autoSub.Text = autoOn and "looking for fresh targets" or "paused"
-    tw(autoSub, EASE.fast, { TextColor3 = autoOn and C.ok or C.mut })
+    tw(autoSub, EASE.fast, { TextColor3 = autoOn and C.green or C.faint })
 end
 
 sw.MouseButton1Click:Connect(function()
     autoOn = not autoOn
     if autoOn and CFG.ONLY_NEW then ST.cursor = ST.eggSeq end
-    pushLog(autoOn and "auto join ON" or "auto join paused", autoOn and C.ok or C.mut)
+    pushLog(autoOn and "auto join ON" or "auto join paused", autoOn and C.green or C.faint)
     paintAuto()
 end)
 pressable(sw, 0.96)
 
-local statCards = {}
-do
-    local x = 250
-    for _, spec in ipairs({ {"servers","SERVERS"}, {"matches","TARGETS"}, {"hops","HOPS"} }) do
-        local f = mk("Frame", {
-            Position = UDim2.new(0,x,0,0), Size = UDim2.new(0,90,0,62),
-            BackgroundColor3 = C.card, BorderSizePixel = 0,
-        }, topRow)
-        corner(f, 12); stroke(f, C.line, 0.5)
-        statCards[spec[1]] = mk("TextLabel", {
-            Position = UDim2.new(0,0,0,13), Size = UDim2.new(1,0,0,22),
-            BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 18,
-            TextColor3 = C.txt, Text = "0",
-        }, f)
-        mk("TextLabel", {
-            Position = UDim2.new(0,0,0,38), Size = UDim2.new(1,0,0,13),
-            BackgroundTransparency = 1, Font = Enum.Font.GothamMedium, TextSize = 9,
-            TextColor3 = C.mut, Text = spec[2],
-        }, f)
-        x = x + 94
-    end
-end
-
 -- diagnostics banner
 local diagCard = mk("Frame", {
-    Size = UDim2.new(1,0,0,44), BackgroundColor3 = C.card,
+    Size = UDim2.new(1,0,0,42), BackgroundColor3 = C.panel,
     BorderSizePixel = 0, Visible = false,
 }, pgHunt)
-corner(diagCard, 11)
-local diagStroke = stroke(diagCard, C.warn, 0.55)
+corner(diagCard, 4)
+local diagStroke = stroke(diagCard, C.amber, 0.4)
 local diagBar = mk("Frame", {
-    Position = UDim2.new(0,0,0,10), Size = UDim2.new(0,3,1,-20),
-    BackgroundColor3 = C.warn, BorderSizePixel = 0,
+    Position = UDim2.new(0,0,0,0), Size = UDim2.new(0,3,1,0),
+    BackgroundColor3 = C.amber, BorderSizePixel = 0,
 }, diagCard)
-local diagTitle = label(diagCard, "", 14, 8, 380, 14, 11, C.warn, Enum.Font.GothamBold)
+local diagTitle = label(diagCard, "", 14, 7, 380, 13, 10.5, C.amber, Enum.Font.GothamBold)
 local diagBody = mk("TextLabel", {
-    Position = UDim2.new(0,14,0,24), Size = UDim2.new(1,-160,0,14),
-    BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10.5,
-    TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = C.txt2,
+    Position = UDim2.new(0,14,0,22), Size = UDim2.new(1,-170,0,14),
+    BackgroundTransparency = 1, Font = MONO, TextSize = 10,
+    TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = C.dim,
     TextTruncate = Enum.TextTruncate.AtEnd, Text = "",
 }, diagCard)
 local diagBtn = mk("TextButton", {
-    Position = UDim2.new(1,-140,0,10), Size = UDim2.new(0,128,0,24),
-    BackgroundColor3 = C.card2, BorderSizePixel = 0, Font = Enum.Font.GothamBold,
-    TextSize = 10, TextColor3 = C.txt2, Text = "", AutoButtonColor = false, Visible = false,
+    Position = UDim2.new(1,-150,0,10), Size = UDim2.new(0,138,0,22),
+    BackgroundColor3 = C.raise, BorderSizePixel = 0, Font = Enum.Font.GothamBold,
+    TextSize = 9.5, TextColor3 = C.dim, Text = "", AutoButtonColor = false, Visible = false,
 }, diagCard)
-corner(diagBtn, 8); stroke(diagBtn, C.line, 0.4); pressable(diagBtn)
+corner(diagBtn, 3); stroke(diagBtn, C.line2, 0); pressable(diagBtn)
 local diagAction = nil
 diagBtn.MouseButton1Click:Connect(function() if diagAction then diagAction() end end)
 
-local listLabel = caption(pgHunt, "LIVE TARGETS", 2, 0, 220)
+local listLabel = caption(pgHunt, "LIVE TARGETS", 2, 0, 260)
 local list = mk("ScrollingFrame", {
     Size = UDim2.new(1,0,1,0), BackgroundTransparency = 1, BorderSizePixel = 0,
-    ScrollBarThickness = 3, ScrollBarImageColor3 = C.line,
+    ScrollBarThickness = 3, ScrollBarImageColor3 = C.line2,
     CanvasSize = UDim2.new(0,0,0,0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
     ScrollingDirection = Enum.ScrollingDirection.Y,
 }, pgHunt)
-mk("UIListLayout", { Padding = UDim.new(0,6), SortOrder = Enum.SortOrder.LayoutOrder }, list)
+mk("UIListLayout", { Padding = UDim.new(0,4), SortOrder = Enum.SortOrder.LayoutOrder }, list)
 
 local emptyLbl = mk("TextLabel", {
-    Size = UDim2.new(1,0,0,52), BackgroundTransparency = 1,
-    Font = Enum.Font.Gotham, TextSize = 11.5, TextColor3 = C.mut, TextWrapped = true,
+    Size = UDim2.new(1,0,0,48), BackgroundTransparency = 1,
+    Font = MONO, TextSize = 11, TextColor3 = C.faint, TextWrapped = true,
     Text = "no targets",
 }, list)
 
@@ -742,11 +757,11 @@ layoutHunt = function(animate)
         if animate then tw(obj, EASE.out, { Position = target }) else obj.Position = target end
         y = y + h
     end
-    place(inCard, 52)
-    place(topRow, 68)
-    place(diagCard, 50)
+    place(inCard, 48)
+    place(topRow, 54)
+    place(diagCard, 48)
     listLabel.Position = UDim2.new(0, 2, 0, y)
-    y = y + 17
+    y = y + 16
     local pos, size = UDim2.new(0,0,0,y), UDim2.new(1,0,1,-y)
     if animate then
         tw(list, EASE.out, { Position = pos, Size = size })
@@ -783,11 +798,11 @@ task.spawn(function()
                     name = t.name, rarity = t.rarity, kg = t.kg,
                     area = t.area, uid = t.uid, at = t.at,
                 }
-                pushLog(("landing confirmed · %s"):format(tostring(t.name or "?")), C.ok)
+                pushLog(("landing confirmed · %s"):format(tostring(t.name or "?")), C.green)
                 task.wait(0.4)
                 pcall(paintInServer)
             else
-                pushLog("landed on a different server", C.warn)
+                pushLog("landed on a different server", C.amber)
             end
         end
         pcall(function() if delfile then delfile(PENDING) end end)
@@ -798,120 +813,123 @@ local function buildRow(e, i, isNew)
     local stale = isStale(e)
     local col = rc(e.rarity)
     local row = mk("Frame", {
-        Size = UDim2.new(1,-6,0,46), BackgroundColor3 = C.card,
+        Size = UDim2.new(1,-4,0,44), BackgroundColor3 = C.panel,
         BackgroundTransparency = 1, BorderSizePixel = 0, LayoutOrder = i,
     }, list)
-    corner(row, 10)
+    corner(row, 4)
     local rs = stroke(row, C.line, 1)
 
     mk("Frame", {
-        Position = UDim2.new(0,0,0,10), Size = UDim2.new(0,3,1,-20),
+        Position = UDim2.new(0,0,0,0), Size = UDim2.new(0,2,1,0),
         BackgroundColor3 = col, BorderSizePixel = 0, BackgroundTransparency = stale and 0.5 or 0,
     }, row)
 
-    local nameLbl = label(row, tostring(e.name), 14, 6, 190, 16, 12.5,
-        stale and C.txt2 or C.txt, Enum.Font.GothamMedium)
-    nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
+    -- The right block is measured first so the name can be clipped exactly
+    -- before it, never under it.
+    local RIGHT = 258
 
-    local sub = ("%s · %s · %s/%s players · %s ago"):format(
-        tostring(e.rarity),
+    local nameLbl = label(row, tostring(e.name), 13, 5, 100, 16, 12.5,
+        stale and C.dim or C.txt, Enum.Font.GothamMedium)
+    nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
+    nameLbl.Size = UDim2.new(1, -(RIGHT + 18), 0, 16)
+
+    -- The job id is on screen now, not hidden behind the copy button: it is
+    -- what you check against the hub console when something looks wrong.
+    local sub = ("%s · %s · %s/%s · %s"):format(
+        shortId(e.jobId),
         (e.area ~= nil and e.area ~= "" and e.area or "zone"),
         tostring(e.players or "?"), tostring(e.maxPlayers or "?"), ago(e.ageMs))
-    local subLblRow = label(row, sub, 14, 23, 250, 14, 10, C.mut)
+    local subLblRow = label(row, sub, 13, 23, 100, 14, 10, C.faint, MONO)
     subLblRow.TextTruncate = Enum.TextTruncate.AtEnd
+    subLblRow.Size = UDim2.new(1, -(RIGHT + 18), 0, 14)
 
-    -- Tags are laid out right to left from a cursor: otherwise an egg that was
-    -- both stale AND in use overlapped them.
-    local rx = 70 + 72
-    local kgTag = mk("Frame", {
-        Position = UDim2.new(1,-rx,0,13), Size = UDim2.new(0,72,0,20),
-        BackgroundColor3 = col, BorderSizePixel = 0,
-        BackgroundTransparency = stale and 0.93 or 0.85,
-    }, row)
-    round(kgTag); stroke(kgTag, col, stale and 0.75 or 0.5)
-    mk("TextLabel", {
-        Size = UDim2.new(1,0,1,0), BackgroundTransparency = 1,
-        Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = col,
-        Text = ("%s kg"):format(tostring(math.floor((tonumber(e.kg) or 0) + 0.5))),
-    }, kgTag)
-
-    -- Stale marker: still shown, but auto join will not take it.
-    if stale then
-        rx = rx + 6 + 48
-        local tag = mk("Frame", {
-            Position = UDim2.new(1,-rx,0,13), Size = UDim2.new(0,48,0,20),
-            BackgroundColor3 = C.mut, BackgroundTransparency = 0.85, BorderSizePixel = 0,
+    -- state badge (only one can apply at a time in practice; stale wins)
+    if stale or e.claimed then
+        local txt = stale and "STALE" or "IN USE"
+        local bcol = stale and C.faint or C.amber
+        local bg = mk("Frame", {
+            Position = UDim2.new(1,-RIGHT,0,12), Size = UDim2.new(0,52,0,20),
+            BackgroundTransparency = 1, BorderSizePixel = 0,
         }, row)
-        round(tag); stroke(tag, C.mut, 0.6)
+        corner(bg, 3); stroke(bg, bcol, 0.55)
         mk("TextLabel", {
             Size = UDim2.new(1,0,1,0), BackgroundTransparency = 1,
-            Font = Enum.Font.GothamBold, TextSize = 9.5, TextColor3 = C.mut, Text = "stale",
-        }, tag)
+            Font = Enum.Font.GothamBold, TextSize = 9, TextColor3 = bcol, Text = txt,
+        }, bg)
     end
 
-    if e.claimed then
-        rx = rx + 6 + 46
-        mk("TextLabel", {
-            Position = UDim2.new(1,-rx,0,13), Size = UDim2.new(0,46,0,20),
-            BackgroundTransparency = 1, Font = Enum.Font.GothamMedium, TextSize = 9.5,
-            TextColor3 = C.warn, Text = "in use",
-        }, row)
-    end
+    local tag = mk("Frame", {
+        Position = UDim2.new(1,-(RIGHT-58),0,12), Size = UDim2.new(0,80,0,20),
+        BackgroundColor3 = col, BorderSizePixel = 0,
+        BackgroundTransparency = stale and 0.86 or 0,
+    }, row)
+    corner(tag, 3)
+    mk("TextLabel", {
+        Size = UDim2.new(1,0,1,0), BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBold, TextSize = 9.5,
+        TextColor3 = stale and col or C.ink,
+        Text = tostring(e.rarity):upper(),
+    }, tag)
 
-    -- Text is clipped just before the first tag, never overlapping it.
-    nameLbl.Size = UDim2.new(1, -(rx + 22), 0, 16)
-    subLblRow.Size = UDim2.new(1, -(rx + 22), 0, 14)
+    mk("TextLabel", {
+        Position = UDim2.new(1,-116,0,12), Size = UDim2.new(0,54,0,20),
+        BackgroundTransparency = 1, Font = MONO, TextSize = 12.5,
+        TextXAlignment = Enum.TextXAlignment.Right, TextColor3 = col,
+        Text = ("%s kg"):format(tostring(math.floor((tonumber(e.kg) or 0) + 0.5))),
+    }, row)
 
     local cp = mk("TextButton", {
-        Position = UDim2.new(1,-62,0,12), Size = UDim2.new(0,24,0,22),
-        BackgroundColor3 = C.card2, BorderSizePixel = 0, Text = "⧉",
-        Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = C.mut, AutoButtonColor = false,
+        Position = UDim2.new(1,-58,0,12), Size = UDim2.new(0,24,0,20),
+        BackgroundTransparency = 1, BorderSizePixel = 0, Text = "⧉",
+        Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = C.faint, AutoButtonColor = false,
     }, row)
-    corner(cp, 7); pressable(cp)
+    corner(cp, 3); stroke(cp, C.line2, 0); pressable(cp)
+    cp.MouseEnter:Connect(function() tw(cp, EASE.fast, { TextColor3 = C.txt }) end)
+    cp.MouseLeave:Connect(function() tw(cp, EASE.fast, { TextColor3 = C.faint }) end)
     cp.MouseButton1Click:Connect(function()
         local set = setclipboard or toclipboard or (syn and syn.write_clipboard)
-        if set then pcall(set, tostring(e.jobId)); pushLog("job id copied", C.mut) end
+        if set then pcall(set, tostring(e.jobId)); pushLog("job id copied", C.faint) end
     end)
 
     local join = mk("TextButton", {
-        Position = UDim2.new(1,-33,0,12), Size = UDim2.new(0,26,0,22),
-        BackgroundColor3 = C.acc, BorderSizePixel = 0, Text = "▶",
-        Font = Enum.Font.GothamBold, TextSize = 10, TextColor3 = C.white,
+        Position = UDim2.new(1,-30,0,12), Size = UDim2.new(0,26,0,20),
+        BackgroundColor3 = C.amber, BorderSizePixel = 0, Text = "▶",
+        Font = Enum.Font.GothamBold, TextSize = 10, TextColor3 = C.ink,
         AutoButtonColor = false,
     }, row)
-    corner(join, 7); grad(join, 20, C.acc, Color3.fromRGB(96, 66, 244)); pressable(join, 0.9)
+    corner(join, 3); pressable(join, 0.9)
     join.MouseButton1Click:Connect(function() doHop(e) end)
 
     row.MouseEnter:Connect(function()
-        tw(row, EASE.fast, { BackgroundColor3 = C.card2 })
-        tw(rs, EASE.fast, { Color = col, Transparency = 0.45 })
+        tw(row, EASE.fast, { BackgroundTransparency = 0 })
+        tw(rs, EASE.fast, { Color = C.line2, Transparency = 0 })
     end)
     row.MouseLeave:Connect(function()
-        tw(row, EASE.fast, { BackgroundColor3 = C.card })
-        tw(rs, EASE.fast, { Color = C.line, Transparency = 0.55 })
+        tw(row, EASE.fast, { BackgroundTransparency = stale and 0.5 or 0.25 })
+        tw(rs, EASE.fast, { Color = C.line, Transparency = 0 })
     end)
 
     -- The list repaints every poll, so only genuinely new rows animate: else
     -- everything cascaded in every 4 seconds and it was dizzying.
-    local restTr = stale and 0.35 or 0
+    local restTr = stale and 0.5 or 0.25
     if isNew then
-        task.delay(math.min(i, 12) * 0.03, function()
+        task.delay(math.min(i, 12) * 0.025, function()
             if not row.Parent then return end
             tw(row, EASE.out, { BackgroundTransparency = restTr })
-            tw(rs, EASE.out, { Transparency = 0.55 })
-            -- a flash in its rarity colour, to catch the eye
+            tw(rs, EASE.out, { Transparency = 0 })
+            -- one sweep in the rarity colour, then it settles
             local flash = mk("Frame", {
                 Size = UDim2.new(1,0,1,0), BackgroundColor3 = col,
-                BackgroundTransparency = 0.72, BorderSizePixel = 0, ZIndex = 0,
+                BackgroundTransparency = 0.82, BorderSizePixel = 0, ZIndex = 0,
             }, row)
-            corner(flash, 10)
-            tw(flash, TweenInfo.new(0.95, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+            corner(flash, 4)
+            tw(flash, TweenInfo.new(0.9, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
                 { BackgroundTransparency = 1 })
-            task.delay(1.05, function() if flash and flash.Parent then flash:Destroy() end end)
+            task.delay(1.0, function() if flash and flash.Parent then flash:Destroy() end end)
         end)
     else
         row.BackgroundTransparency = restTr
-        rs.Transparency = 0.55
+        rs.Transparency = 0
     end
 
     return row
@@ -944,8 +962,8 @@ local function paintDiag()
     emptyLbl.Visible = true
 
     if not ST.connected then
-        show("no connection to the hub", tostring(ST.lastErr or "not responding"), C.bad)
-        emptyLbl.Text = "check the URL and API key under SETTINGS"
+        show("no connection to the hub", tostring(ST.lastErr or "not responding"), C.red)
+        emptyLbl.Text = "check the URL and API key under CONFIG"
         layoutHunt(true); return
     end
     if not d then
@@ -959,27 +977,27 @@ local function paintDiag()
         layoutHunt(true); return
     end
     if d.servers == 0 then
-        show("no reporter is sending", "the hub is empty", C.warn)
+        show("no reporter is sending", "the hub is empty", C.amber)
         emptyLbl.Text = "waiting for a reporter to upload eggs"
         layoutHunt(true); return
     end
     if d.rarityFilterUnknown then
         show("your rarities do not exist in the game",
-            "none of them match the real list", C.bad,
+            "none of them match the real list", C.red,
             "SELECT THE RARE ONES", function()
                 CFG.RARITIES = {}
                 for _, r in ipairs(ST.ladder) do
                     if (tonumber(r.rank) or 0) >= 5 then table.insert(CFG.RARITIES, r.name) end
                 end
                 save()
-                pushLog("rarity filter rebuilt", C.ok)
+                pushLog("rarity filter rebuilt", C.green)
             end)
         emptyLbl.Text = "fix the rarity filter"
         layoutHunt(true); return
     end
     if d.total == 0 then
         show("the servers are empty",
-            ("%d reporting, 0 eggs right now"):format(d.servers), C.warn)
+            ("%d reporting, 0 eggs right now"):format(d.servers), C.amber)
         emptyLbl.Text = "waiting for eggs"
         layoutHunt(true); return
     end
@@ -993,11 +1011,11 @@ local function paintDiag()
         elseif d.top.reason == "before cursor" then
             btnText, action = "ACCEPT CURRENT ONES", function()
                 ST.cursor = 0
-                pushLog("cursor reset to zero", C.warn)
+                pushLog("cursor reset to zero", C.amber)
             end
         end
         show(("%d eggs in the hub, none match"):format(d.total),
-            table.concat(bits, "  ·  "), C.warn, btnText, action)
+            table.concat(bits, "  ·  "), C.amber, btnText, action)
         emptyLbl.Text = "adjust the filters or wait for a find"
         layoutHunt(true); return
     end
@@ -1023,7 +1041,7 @@ local function renderList()
     end
 
     listLabel.Text = (#ST.candidates > 0)
-        and ("LIVE TARGETS   ·   %d fresh of %d"):format(fresh, #ST.candidates)
+        and ("LIVE TARGETS   ·   %d FRESH OF %d"):format(fresh, #ST.candidates)
         or "LIVE TARGETS"
     paintDiag()
 end
@@ -1032,20 +1050,19 @@ end
 local function field(parent, lbl, x, y, w, value, onChange)
     caption(parent, lbl, x + 2, y, w)
     local box = mk("TextBox", {
-        Position = UDim2.new(0,x,0,y+16), Size = UDim2.new(0,w,0,30),
-        BackgroundColor3 = C.card, BorderSizePixel = 0,
-        Font = Enum.Font.Gotham, TextSize = 11.5, TextColor3 = C.txt,
+        Position = UDim2.new(0,x,0,y+15), Size = UDim2.new(0,w,0,28),
+        BackgroundColor3 = C.bg, BorderSizePixel = 0,
+        Font = MONO, TextSize = 11.5, TextColor3 = C.txt,
+        TextXAlignment = Enum.TextXAlignment.Left,
         ClearTextOnFocus = false, Text = tostring(value),
     }, parent)
-    corner(box, 9); pad(box, 10, 10)
-    local s = stroke(box, C.line, 0.5)
+    corner(box, 3); pad(box, 9, 9)
+    local s = stroke(box, C.line2, 0)
     box.Focused:Connect(function()
-        tw(s, EASE.fast, { Color = C.acc, Transparency = 0 })
-        tw(box, EASE.fast, { BackgroundColor3 = C.card2 })
+        tw(s, EASE.fast, { Color = C.amber, Transparency = 0 })
     end)
     box.FocusLost:Connect(function()
-        tw(s, EASE.fast, { Color = C.line, Transparency = 0.5 })
-        tw(box, EASE.fast, { BackgroundColor3 = C.card })
+        tw(s, EASE.fast, { Color = C.line2, Transparency = 0 })
         onChange(box.Text); save()
     end)
     return box
@@ -1053,30 +1070,30 @@ end
 
 local function toggleRow(parent, x, y, w, text, get, set)
     local b = mk("TextButton", {
-        Position = UDim2.new(0,x,0,y), Size = UDim2.new(0,w,0,32),
-        BackgroundColor3 = C.card, BorderSizePixel = 0, Text = "", AutoButtonColor = false,
+        Position = UDim2.new(0,x,0,y), Size = UDim2.new(0,w,0,30),
+        BackgroundTransparency = 1, BorderSizePixel = 0, Text = "", AutoButtonColor = false,
     }, parent)
-    corner(b, 9); pressable(b, 0.98)
-    local s = stroke(b, C.line, 0.5)
+    corner(b, 3); pressable(b, 0.985)
+    local s = stroke(b, C.line, 0)
     local mark = mk("Frame", {
-        Position = UDim2.new(0,11,0,10), Size = UDim2.new(0,13,0,13),
-        BackgroundColor3 = C.card2, BorderSizePixel = 0,
+        Position = UDim2.new(0,10,0,9), Size = UDim2.new(0,12,0,12),
+        BackgroundColor3 = C.raise, BorderSizePixel = 0,
     }, b)
-    corner(mark, 4)
-    local ms = stroke(mark, C.line, 0.2)
+    corner(mark, 2)
+    local ms = stroke(mark, C.line2, 0)
     local tick = mk("TextLabel", {
         Size = UDim2.new(1,0,1,0), BackgroundTransparency = 1,
-        Font = Enum.Font.GothamBold, TextSize = 10, TextColor3 = C.ink, Text = "✓",
+        Font = Enum.Font.GothamBold, TextSize = 9, TextColor3 = C.ink, Text = "✓",
     }, mark)
-    local lbl = label(b, text, 32, 0, w - 42, 32, 11, C.txt2)
+    local lbl = label(b, text, 30, 0, w - 40, 30, 10.5, C.dim)
     lbl.TextYAlignment = Enum.TextYAlignment.Center
     local function paint()
         local on = get()
         tick.Visible = on
-        tw(mark, EASE.fast, { BackgroundColor3 = on and C.ok or C.card2 })
-        tw(ms, EASE.fast, { Color = on and C.ok or C.line })
-        tw(lbl, EASE.fast, { TextColor3 = on and C.txt or C.mut })
-        tw(s, EASE.fast, { Color = on and C.ok or C.line, Transparency = on and 0.55 or 0.5 })
+        tw(mark, EASE.fast, { BackgroundColor3 = on and C.green or C.raise })
+        tw(ms, EASE.fast, { Color = on and C.green or C.line2 })
+        tw(lbl, EASE.fast, { TextColor3 = on and C.txt or C.faint })
+        tw(s, EASE.fast, { Color = on and C.green or C.line, Transparency = on and 0.55 or 0 })
     end
     b.MouseButton1Click:Connect(function() set(not get()); paint(); save() end)
     paint()
@@ -1086,22 +1103,22 @@ end
 caption(pgFilter, "ACCEPTED RARITIES", 2, 0, 220)
 local ladderNote = mk("TextLabel", {
     Position = UDim2.new(1,-214,0,0), Size = UDim2.new(0,212,0,13),
-    BackgroundTransparency = 1, Font = Enum.Font.GothamMedium, TextSize = 9.5,
-    TextXAlignment = Enum.TextXAlignment.Right, TextColor3 = C.warn,
+    BackgroundTransparency = 1, Font = MONO, TextSize = 9.5,
+    TextXAlignment = Enum.TextXAlignment.Right, TextColor3 = C.amber,
     Text = "", Visible = false,
 }, pgFilter)
 
 local chipHolder = mk("ScrollingFrame", {
     Position = UDim2.new(0,0,0,17), Size = UDim2.new(1,0,0,88),
     BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3,
-    ScrollBarImageColor3 = C.line, CanvasSize = UDim2.new(0,0,0,0),
+    ScrollBarImageColor3 = C.line2, CanvasSize = UDim2.new(0,0,0,0),
     AutomaticCanvasSize = Enum.AutomaticSize.Y,
     ScrollingDirection = Enum.ScrollingDirection.Y,
 }, pgFilter)
 do
     local lay = mk("UIListLayout", {
         FillDirection = Enum.FillDirection.Horizontal,
-        Padding = UDim.new(0,5), SortOrder = Enum.SortOrder.LayoutOrder,
+        Padding = UDim.new(0,4), SortOrder = Enum.SortOrder.LayoutOrder,
     }, chipHolder)
     pcall(function() lay.Wraps = true end)
 end
@@ -1125,17 +1142,18 @@ renderChips = function()
     for i, r in ipairs(ST.ladder) do
         local on, col = hasRarity(r.name), rc(r.name)
         local b = mk("TextButton", {
-            Size = UDim2.new(0, 24 + #r.name * 6.6, 0, 26),
-            BackgroundColor3 = on and col or C.card, BorderSizePixel = 0, LayoutOrder = i,
-            Font = Enum.Font.GothamBold, TextSize = 10.5,
+            Size = UDim2.new(0, 22 + #r.name * 6.4, 0, 24),
+            BackgroundColor3 = col, BackgroundTransparency = on and 0 or 1,
+            BorderSizePixel = 0, LayoutOrder = i,
+            Font = Enum.Font.GothamBold, TextSize = 10,
             TextColor3 = on and C.ink or col, Text = r.name, AutoButtonColor = false,
         }, chipHolder)
-        round(b); stroke(b, col, on and 1 or 0.55); pressable(b, 0.92)
+        corner(b, 3); stroke(b, col, on and 1 or 0.5); pressable(b, 0.93)
         b.MouseEnter:Connect(function()
-            if not on then tw(b, EASE.fast, { BackgroundColor3 = C.card2 }) end
+            if not on then tw(b, EASE.fast, { BackgroundTransparency = 0.86 }) end
         end)
         b.MouseLeave:Connect(function()
-            if not on then tw(b, EASE.fast, { BackgroundColor3 = C.card }) end
+            if not on then tw(b, EASE.fast, { BackgroundTransparency = 1 }) end
         end)
         b.MouseButton1Click:Connect(function()
             for j, v in ipairs(CFG.RARITIES) do
@@ -1153,20 +1171,20 @@ do
     local function quick(text, x, w, fn)
         local b = mk("TextButton", {
             Position = UDim2.new(0,x,0,y), Size = UDim2.new(0,w,0,24),
-            BackgroundColor3 = C.card, BorderSizePixel = 0, Font = Enum.Font.GothamMedium,
-            TextSize = 10.5, TextColor3 = C.txt2, Text = text, AutoButtonColor = false,
+            BackgroundColor3 = C.raise, BorderSizePixel = 0, Font = Enum.Font.GothamBold,
+            TextSize = 10, TextColor3 = C.dim, Text = text, AutoButtonColor = false,
         }, pgFilter)
-        corner(b, 7); stroke(b, C.line, 0.5); pressable(b)
-        b.MouseEnter:Connect(function() tw(b, EASE.fast, { BackgroundColor3 = C.card2 }) end)
-        b.MouseLeave:Connect(function() tw(b, EASE.fast, { BackgroundColor3 = C.card }) end)
+        corner(b, 3); stroke(b, C.line2, 0); pressable(b)
+        b.MouseEnter:Connect(function() tw(b, EASE.fast, { TextColor3 = C.txt }) end)
+        b.MouseLeave:Connect(function() tw(b, EASE.fast, { TextColor3 = C.dim }) end)
         b.MouseButton1Click:Connect(function() fn(); save(); renderChips() end)
     end
-    quick("all", 0, 72, function()
+    quick("ALL", 0, 70, function()
         CFG.RARITIES = {}
         for _, r in ipairs(ST.ladder) do table.insert(CFG.RARITIES, r.name) end
     end)
-    quick("none", 78, 72, function() CFG.RARITIES = {} end)
-    quick("rare only", 156, 88, function()
+    quick("NONE", 76, 70, function() CFG.RARITIES = {} end)
+    quick("RARE ONLY", 152, 86, function()
         CFG.RARITIES = {}
         for _, r in ipairs(ST.ladder) do
             if (tonumber(r.rank) or 0) >= 5 then table.insert(CFG.RARITIES, r.name) end
@@ -1181,45 +1199,44 @@ field(pgFilter, "MAX AGE (s)", 310, 162, 118, CFG.MAX_AGE, function(v)
     CFG.MAX_AGE = math.max(0, tonumber(v) or 0)
 end)
 
-caption(pgFilter, "RULES", 2, 212, 220)
-toggleRow(pgFilter, 0, 228, 258, "ignore what was already there on start",
+caption(pgFilter, "RULES", 2, 210, 220)
+toggleRow(pgFilter, 0, 226, 258, "ignore what was already there on start",
     function() return CFG.ONLY_NEW end,
     function(v) CFG.ONLY_NEW = v; if v then ST.cursor = ST.eggSeq end end)
-toggleRow(pgFilter, 266, 228, 258, "only servers with a free slot",
+toggleRow(pgFilter, 266, 226, 258, "only servers with a free slot",
     function() return CFG.HAS_SLOT end,
     function(v) CFG.HAS_SLOT = v end)
 
 mk("TextLabel", {
-    Position = UDim2.new(0,2,0,266), Size = UDim2.new(1,-4,0,40),
+    Position = UDim2.new(0,2,0,266), Size = UDim2.new(1,-4,0,46),
     BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10.5,
     TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
-    TextColor3 = C.mut, TextWrapped = true,
-    Text = "Finds older than MAX AGE stay visible in the list, tagged as "
-        .. "«stale», but auto join will not go for them. You can still join "
-        .. "them yourself with ▶.",
+    TextColor3 = C.faint, TextWrapped = true,
+    Text = "Finds older than MAX AGE stay visible in the list, tagged STALE, but "
+        .. "auto join will not go for them. You can still join them yourself with ▶.",
 }, pgFilter)
 
--- ═════════════════════════════════════════════════════════════════════ SETTINGS
+-- ═════════════════════════════════════════════════════════════════════ CONFIG
 caption(pgConfig, "CONNECTION", 2, 0, 220)
 field(pgConfig, "HUB URL", 0, 16, 528, CFG.HUB, function(v) CFG.HUB = (v:gsub("%s+",""):gsub("/+$","")) end)
-field(pgConfig, "API KEY", 0, 64, 326, CFG.KEY, function(v) CFG.KEY = (v:gsub("%s+","")) end)
-field(pgConfig, "NAME OF THIS CLIENT", 336, 64, 192, CFG.CLIENT, function(v) CFG.CLIENT = v end)
+field(pgConfig, "API KEY", 0, 62, 326, CFG.KEY, function(v) CFG.KEY = (v:gsub("%s+","")) end)
+field(pgConfig, "NAME OF THIS CLIENT", 336, 62, 192, CFG.CLIENT, function(v) CFG.CLIENT = v end)
 
-caption(pgConfig, "PACING", 2, 114, 220)
-field(pgConfig, "POLL (s)", 0, 130, 100, CFG.POLL, function(v) CFG.POLL = math.max(2, tonumber(v) or 4) end)
-field(pgConfig, "COOLDOWN (s)", 110, 130, 116, CFG.COOLDOWN, function(v) CFG.COOLDOWN = math.max(3, tonumber(v) or 8) end)
-field(pgConfig, "CLAIM WAIT (s)", 236, 130, 190, CFG.WAIT, function(v) CFG.WAIT = math.max(5, math.min(50, tonumber(v) or 20)) end)
+caption(pgConfig, "PACING", 2, 112, 220)
+field(pgConfig, "POLL (s)", 0, 128, 100, CFG.POLL, function(v) CFG.POLL = math.max(2, tonumber(v) or 4) end)
+field(pgConfig, "COOLDOWN (s)", 110, 128, 116, CFG.COOLDOWN, function(v) CFG.COOLDOWN = math.max(3, tonumber(v) or 8) end)
+field(pgConfig, "CLAIM WAIT (s)", 236, 128, 190, CFG.WAIT, function(v) CFG.WAIT = math.max(5, math.min(50, tonumber(v) or 20)) end)
 
 do
     local test = mk("TextButton", {
-        Position = UDim2.new(0,0,0,192), Size = UDim2.new(0,162,0,32),
-        BackgroundColor3 = C.acc, BorderSizePixel = 0, Text = "", AutoButtonColor = false,
+        Position = UDim2.new(0,0,0,188), Size = UDim2.new(0,162,0,30),
+        BackgroundColor3 = C.amber, BorderSizePixel = 0, Text = "", AutoButtonColor = false,
     }, pgConfig)
-    corner(test, 9); grad(test, 20, C.acc, Color3.fromRGB(96,66,244)); pressable(test)
+    corner(test, 3); pressable(test)
     local tl = mk("TextLabel", {
         Size = UDim2.new(1,0,1,0), BackgroundTransparency = 1,
-        Font = Enum.Font.GothamBold, TextSize = 11.5,
-        TextColor3 = C.white, Text = "TEST CONNECTION",
+        Font = Enum.Font.GothamBold, TextSize = 11,
+        TextColor3 = C.ink, Text = "TEST CONNECTION",
     }, test)
     test.MouseButton1Click:Connect(function()
         tl.Text = "TESTING…"
@@ -1227,19 +1244,19 @@ do
             local res, err = httpJson("GET", "/api/meta")
             tl.Text = res and "CONNECTED ✓" or "NO CONNECTION"
             if res then
-                pushLog(("hub ok · %d servers · %d eggs"):format(res.servers or 0, res.eggs or 0), C.ok)
+                pushLog(("hub ok · %d servers · %d eggs"):format(res.servers or 0, res.eggs or 0), C.green)
             else
-                pushLog("hub error: " .. tostring(err), C.bad)
+                pushLog("hub error: " .. tostring(err), C.red)
             end
             task.delay(2, function() tl.Text = "TEST CONNECTION" end)
         end)
     end)
 
     mk("TextLabel", {
-        Position = UDim2.new(0,174,0,192), Size = UDim2.new(1,-174,0,40),
+        Position = UDim2.new(0,174,0,188), Size = UDim2.new(1,-174,0,46),
         BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 10.5,
         TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
-        TextColor3 = C.mut, TextWrapped = true,
+        TextColor3 = C.faint, TextWrapped = true,
         Text = "Each field saves when you leave it. The same API key you set on the hub and the reporter.",
     }, pgConfig)
 end
@@ -1248,11 +1265,11 @@ end
 do
     logList = mk("ScrollingFrame", {
         Size = UDim2.new(1,0,1,0), BackgroundTransparency = 1, BorderSizePixel = 0,
-        ScrollBarThickness = 3, ScrollBarImageColor3 = C.line,
+        ScrollBarThickness = 3, ScrollBarImageColor3 = C.line2,
         CanvasSize = UDim2.new(0,0,0,0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
         ScrollingDirection = Enum.ScrollingDirection.Y,
     }, pgLog)
-    mk("UIListLayout", { Padding = UDim.new(0,2), SortOrder = Enum.SortOrder.LayoutOrder }, logList)
+    mk("UIListLayout", { Padding = UDim.new(0,1), SortOrder = Enum.SortOrder.LayoutOrder }, logList)
 
     renderLog = function()
         for _, c in ipairs(logList:GetChildren()) do
@@ -1261,39 +1278,43 @@ do
         for i, e in ipairs(ST.logs) do
             if i > 60 then break end
             local row = mk("Frame", {
-                Size = UDim2.new(1,-6,0,19), BackgroundTransparency = 1, LayoutOrder = i,
+                Size = UDim2.new(1,-6,0,18), BackgroundTransparency = 1, LayoutOrder = i,
             }, logList)
             mk("Frame", {
-                Position = UDim2.new(0,0,0,6), Size = UDim2.new(0,2,0,8),
+                Position = UDim2.new(0,0,0,5), Size = UDim2.new(0,2,0,8),
                 BackgroundColor3 = e.c, BorderSizePixel = 0,
             }, row)
-            label(row, e.t, 10, 0, 56, 19, 10, C.mut, Enum.Font.Code)
-            label(row, e.s, 70, 0, 440, 19, 11, e.c).TextTruncate = Enum.TextTruncate.AtEnd
+            label(row, e.t, 10, 0, 58, 18, 10, C.line2, MONO)
+            label(row, e.s, 72, 0, 440, 18, 10.5, e.c, MONO).TextTruncate = Enum.TextTruncate.AtEnd
         end
     end
 end
 
 -- ═══════════════════════════════════════════════════════════════════════ status
 local function paintStatus()
-    statCards.servers.Text = tostring(ST.servers)
-    statCards.matches.Text = tostring(#ST.candidates)
-    statCards.hops.Text    = tostring(ST.hops)
-    connDot.BackgroundColor3 = ST.connected and C.ok or C.bad
-    connLbl.Text = ST.connected and ("live · " .. ST.eggsLive .. " eggs") or "offline"
-    connLbl.TextColor3 = ST.connected and C.txt2 or C.bad
+    readout.servers.Text = tostring(ST.servers)
+    readout.eggs.Text    = tostring(ST.eggsLive)
+    readout.hops.Text    = tostring(ST.hops)
+    readout.pool.Text    = ST.pool and tostring(ST.pool) or "—"
+
+    connDot.BackgroundColor3 = ST.connected and C.green or C.red
+    connLbl.Text = ST.connected and "live" or "offline"
+    connLbl.TextColor3 = ST.connected and C.dim or C.red
+    connStroke.Color = ST.connected and C.line or C.red
+    connStroke.Transparency = ST.connected and 0 or 0.5
 
     if not ST.connected then
         subLbl.Text = "hub: " .. tostring(ST.lastErr or "no response")
-        subLbl.TextColor3 = C.bad
+        subLbl.TextColor3 = C.red
     elseif ST.inServer then
-        subLbl.Text = "you are on the server of " .. tostring(ST.inServer.name or "?")
-        subLbl.TextColor3 = C.ok
+        subLbl.Text = "on the server of " .. tostring(ST.inServer.name or "?")
+        subLbl.TextColor3 = C.green
     elseif ST.latency >= 0 then
-        subLbl.Text = "last target received in " .. ST.latency .. " ms"
-        subLbl.TextColor3 = C.mut
+        subLbl.Text = "last target in " .. ST.latency .. " ms"
+        subLbl.TextColor3 = C.faint
     else
         subLbl.Text = "connected · waiting for a target"
-        subLbl.TextColor3 = C.mut
+        subLbl.TextColor3 = C.faint
     end
 end
 
@@ -1302,10 +1323,15 @@ task.spawn(function()
     while true do
         local meta, err = httpJson("GET", "/api/meta")
         if meta then
-            if not ST.connected then pushLog("connected to the hub", C.ok) end
+            if not ST.connected then pushLog("connected to the hub", C.green) end
             ST.connected, ST.lastErr = true, nil
             ST.servers  = meta.servers or 0
             ST.eggsLive = meta.eggs or 0
+            -- The hub reports its scraped job-id pool in /api/meta, so the
+            -- readout costs no extra request.
+            if type(meta.pool) == "table" and type(meta.pool.pool) == "table" then
+                ST.pool = tonumber(meta.pool.pool.total)
+            end
             if tonumber(meta.eggSeq) then
                 ST.eggSeq = tonumber(meta.eggSeq)
                 if ST.cursor == nil then ST.cursor = ST.eggSeq end
@@ -1316,7 +1342,7 @@ task.spawn(function()
                 if changed then pcall(renderChips) end
             end
         else
-            if ST.connected or ST.lastErr ~= err then pushLog("hub: " .. tostring(err), C.bad) end
+            if ST.connected or ST.lastErr ~= err then pushLog("hub: " .. tostring(err), C.red) end
             ST.connected, ST.lastErr = false, err
         end
 
@@ -1354,7 +1380,7 @@ task.spawn(function()
             elseif not res then
                 if os.clock() - (ST.lastClaimErr or 0) > 20 then
                     ST.lastClaimErr = os.clock()
-                    pushLog("claim: " .. tostring(err), C.warn)
+                    pushLog("claim: " .. tostring(err), C.amber)
                 end
             end
         end
@@ -1365,14 +1391,14 @@ end)
 -- ══════════════════════════════════════════════════════════════════════ toggle
 local function togglePanel()
     if root.Visible then
-        tw(uiScale, EASE.fast, { Scale = uiScale.Scale * 0.94 })
+        tw(uiScale, EASE.fast, { Scale = uiScale.Scale * 0.95 })
         task.wait(0.12)
         root.Visible = false
         fitViewport()
     else
         root.Visible = true
         local s = uiScale.Scale
-        uiScale.Scale = s * 0.94
+        uiScale.Scale = s * 0.95
         tw(uiScale, EASE.back, { Scale = s })
     end
 end
@@ -1380,6 +1406,13 @@ end
 UIS.InputBegan:Connect(function(input, gpe)
     if gpe then return end
     if input.KeyCode == Enum.KeyCode.RightControl then togglePanel() end
+    -- 1-4 jump straight to a section, the same keys the web console uses.
+    if not root.Visible then return end
+    local n = ({
+        [Enum.KeyCode.One] = 1, [Enum.KeyCode.Two] = 2,
+        [Enum.KeyCode.Three] = 3, [Enum.KeyCode.Four] = 4,
+    })[input.KeyCode]
+    if n then selectTab(order[n]) end
 end)
 
 -- Floating button: mobile has no Right Control. Draggable so it stays out of
@@ -1387,17 +1420,16 @@ end)
 do
     local fab = mk("TextButton", {
         AnchorPoint = Vector2.new(0, 0.5),
-        Position = UDim2.new(0, 12, 0.5, 0), Size = UDim2.new(0, 46, 0, 46),
-        BackgroundColor3 = C.acc, BorderSizePixel = 0, Text = "",
+        Position = UDim2.new(0, 12, 0.5, 0), Size = UDim2.new(0, 44, 0, 44),
+        BackgroundColor3 = C.panel, BorderSizePixel = 0, Text = "",
         AutoButtonColor = false, Active = true, Draggable = true,
         Visible = IS_TOUCH,
     }, gui)
-    round(fab)
-    grad(fab, 130, C.acc, C.acc2)
-    stroke(fab, C.white, 0.75, 1.4)
+    corner(fab, 5)
+    stroke(fab, C.amber, 0.35, 1)
     mk("TextLabel", {
         Size = UDim2.new(1,0,1,0), BackgroundTransparency = 1,
-        Font = Enum.Font.GothamBold, TextSize = 15, TextColor3 = C.ink, Text = "S",
+        Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = C.amber, Text = "AJ",
     }, fab)
     pressable(fab, 0.9)
     fab.MouseButton1Click:Connect(togglePanel)
@@ -1408,13 +1440,13 @@ for _, step in ipairs({
     { "tabs",   function() selectTab("hunt") end },
     { "toggle", paintAuto },
     { "layout", function() layoutHunt(false) end },
-    { "estado", paintStatus },
+    { "status", paintStatus },
 }) do
     local ok, err = pcall(step[2])
-    if not ok then pushLog("failed to draw " .. step[1] .. ": " .. tostring(err), C.bad) end
+    if not ok then pushLog("failed to draw " .. step[1] .. ": " .. tostring(err), C.red) end
 end
 
 if not httpreq then
-    pushLog("your executor does not expose request(): the AJ cannot reach the hub", C.bad)
+    pushLog("your executor does not expose request(): the AJ cannot reach the hub", C.red)
 end
-pushLog("SAE AJ v5 ready · " .. (IS_TOUCH and "mobile" or "PC"), C.acc2)
+pushLog("SAE AJ v5 ready · " .. (IS_TOUCH and "mobile" or "PC"), C.cyan)
